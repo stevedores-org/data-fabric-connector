@@ -38,6 +38,8 @@ curl localhost:8080/healthz
 curl localhost:8080/v1/version
 ```
 
+**Production FQDN:** `https://dfc.aivcs.io` (Gateway API → `shared-tls-gateway`, listener `https-aivcs-io-wildcard`).
+
 E1 uses in-memory mock upstreams. Set `DATA_FABRIC_TENANT_ID` when wiring real clients (E6).
 
 ## OCI image (Nix)

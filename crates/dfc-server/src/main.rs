@@ -27,6 +27,8 @@ use config::ServerConfig;
 #[derive(Clone)]
 struct AppState {
     git_sha: &'static str,
+    public_fqdn: String,
+    public_url: String,
     data_fabric: Arc<MockDataFabricClient>,
     aivcs: Arc<MockAivcsClient>,
 }
@@ -36,6 +38,8 @@ struct VersionResponse {
     service: &'static str,
     schema_version: &'static str,
     git_sha: &'static str,
+    fqdn: String,
+    public_url: String,
 }
 
 #[derive(Serialize)]
@@ -64,10 +68,16 @@ async fn main() -> anyhow::Result<()> {
         .init();
 
     let cfg = ServerConfig::from_env();
-    info!(port = cfg.port, "dfc-server starting");
+    info!(
+        port = cfg.port,
+        fqdn = %cfg.public_fqdn,
+        "dfc-server starting"
+    );
 
     let state = AppState {
         git_sha: option_env!("GIT_SHA").unwrap_or("dev"),
+        public_fqdn: cfg.public_fqdn.clone(),
+        public_url: cfg.public_url(),
         data_fabric: Arc::new(MockDataFabricClient::default()),
         aivcs: Arc::new(MockAivcsClient),
     };
@@ -113,6 +123,8 @@ async fn version(State(state): State<AppState>) -> Json<VersionResponse> {
         service: "dfc",
         schema_version: SCHEMA_VERSION,
         git_sha: state.git_sha,
+        fqdn: state.public_fqdn.clone(),
+        public_url: state.public_url.clone(),
     })
 }
 
@@ -405,6 +417,8 @@ mod tests {
     fn app() -> Router {
         let state = AppState {
             git_sha: "test",
+            public_fqdn: config::DEFAULT_PUBLIC_FQDN.into(),
+            public_url: format!("https://{}", config::DEFAULT_PUBLIC_FQDN),
             data_fabric: Arc::new(MockDataFabricClient::default()),
             aivcs: Arc::new(MockAivcsClient),
         };

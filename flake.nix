@@ -91,6 +91,7 @@
                 "https://github.com/stevedores-org/data-fabric-connector";
               "org.opencontainers.image.licenses" = "Apache-2.0";
               "stevedores.org/managed-by" = "dockworker";
+              "stevedores.org/fqdn" = "dfc.aivcs.io";
             };
           };
         };

@@ -17,6 +17,7 @@ metadata:
 data:
   DFC_HOST: "0.0.0.0"
   DFC_PORT: "8080"
+  DFC_PUBLIC_FQDN: "dfc.aivcs.io"
   AIVCS_API_URL: "http://aivcs-api.aivcs.svc.cluster.local"
   DATA_FABRIC_URL: "http://data-fabric.data-fabric.svc.cluster.local"
 ---
