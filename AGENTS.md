@@ -34,6 +34,10 @@ cargo test --workspace
 cargo run -p dfc-server
 cargo fmt --all
 cargo clippy --all --all-targets -- -D warnings
+
+# OCI image (Linux)
+nix build .#dfc-image
+nix flake check
 ```
 
 ## Related repos

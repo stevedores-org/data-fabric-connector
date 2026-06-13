@@ -26,6 +26,7 @@ crates/dfc-hitl/          review bundle assembly
 crates/dfc-server/        HTTP server (axum)
 schemas/                  JSON schemas + fixtures
 deploy/base/              k8s manifests
+flake.nix                 OCI image via nix (`nix build .#dfc-image`)
 tests/                    contract & integration tests (future epics)
 ```
 
@@ -38,6 +39,16 @@ curl localhost:8080/v1/version
 ```
 
 E1 uses in-memory mock upstreams. Set `DATA_FABRIC_TENANT_ID` when wiring real clients (E6).
+
+## OCI image (Nix)
+
+```bash
+# Linux builder (CI / remote builder)
+nix build .#dfc-image
+skopeo copy docker-archive:result docker://ghcr.io/stevedores-org/data-fabric-connector:latest
+```
+
+On macOS, build the image via a Linux remote builder or CI — same pattern as `mom`.
 
 ## API surface
 
