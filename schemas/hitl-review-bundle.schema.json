@@ -1,0 +1,24 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://github.com/stevedores-org/data-fabric-connector/schemas/hitl-review-bundle.schema.json",
+  "title": "HitlReviewBundle",
+  "type": "object",
+  "required": ["schema_version", "review_id", "tenant_id", "revision"],
+  "properties": {
+    "schema_version": { "type": "string", "const": "dfc.v1" },
+    "review_id": { "type": "string" },
+    "tenant_id": { "type": "string" },
+    "correlation_id": { "type": "string" },
+    "run_id": { "type": "string" },
+    "task_id": { "type": "string" },
+    "aivcs_snapshot_ref": { "type": "string" },
+    "branch_ref": { "type": "string" },
+    "diff_ref": { "type": "string" },
+    "validation_result": { "type": "object" },
+    "evidence_graph_ref": { "type": "string" },
+    "policy_decision": { "type": "object" },
+    "rollback_plan": { "type": "object" },
+    "revision": { "type": "integer", "minimum": 0 }
+  },
+  "additionalProperties": false
+}

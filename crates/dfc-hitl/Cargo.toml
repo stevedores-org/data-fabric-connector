@@ -1,0 +1,17 @@
+[package]
+name = "dfc-hitl"
+version.workspace = true
+edition.workspace = true
+authors.workspace = true
+license.workspace = true
+repository.workspace = true
+description = "HITL review bundle types and assembly for DFC"
+
+[dependencies]
+dfc-aivcs = { path = "../dfc-aivcs" }
+dfc-core = { path = "../dfc-core" }
+dfc-data-fabric = { path = "../dfc-data-fabric" }
+serde = { workspace = true }
+serde_json = { workspace = true }
+thiserror = { workspace = true }
+tokio = { workspace = true, features = ["sync"] }

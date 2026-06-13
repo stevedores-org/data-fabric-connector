@@ -1,0 +1,19 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://github.com/stevedores-org/data-fabric-connector/schemas/replay-request.schema.json",
+  "title": "ReplayRequest",
+  "type": "object",
+  "required": ["tenant_id", "run_id", "idempotency_key"],
+  "properties": {
+    "tenant_id": { "type": "string" },
+    "repo": { "type": "string" },
+    "run_id": { "type": "string" },
+    "task_id": { "type": "string" },
+    "from_snapshot": { "type": "string" },
+    "to_snapshot": { "type": "string" },
+    "target_snapshot_id": { "type": "string" },
+    "mode": { "type": "string", "enum": ["dry_run", "execute"] },
+    "idempotency_key": { "type": "string", "minLength": 1 }
+  },
+  "additionalProperties": false
+}

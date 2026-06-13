@@ -1,0 +1,24 @@
+use serde::{Deserialize, Serialize};
+
+#[derive(Debug, Clone, Deserialize, Serialize)]
+pub struct TenantContext {
+    pub tenant_id: String,
+}
+
+impl TenantContext {
+    pub fn new(tenant_id: impl Into<String>) -> Self {
+        Self {
+            tenant_id: tenant_id.into(),
+        }
+    }
+
+    pub fn ensure(&self, resource_tenant: &str) -> Result<(), crate::DfcError> {
+        if self.tenant_id != resource_tenant {
+            return Err(crate::DfcError::TenantMismatch {
+                expected: self.tenant_id.clone(),
+                actual: resource_tenant.to_string(),
+            });
+        }
+        Ok(())
+    }
+}
