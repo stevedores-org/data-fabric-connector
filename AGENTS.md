@@ -17,6 +17,18 @@ DFC is a **stateless** Rust service. It normalizes events and correlates IDs bet
 
 Use `worktrees/dfc-*` branches off this repo. Do not edit the primary checkout for PR work.
 
+## Branching
+
+- **`develop`** — integration branch; open feature and chore PRs here.
+- **`main`** — release branch; merge from `develop` when ready to ship.
+
+Create feature branches from `develop`:
+
+```bash
+git fetch origin develop
+git checkout -b feat/my-change origin/develop
+```
+
 ## Epics
 
 | Issue | Scope |

@@ -1,0 +1,19 @@
+[package]
+name = "dfc-replay"
+version.workspace = true
+edition.workspace = true
+authors.workspace = true
+license.workspace = true
+repository.workspace = true
+description = "Replay and rollback bridging for DFC"
+
+[dependencies]
+dfc-aivcs = { path = "../dfc-aivcs" }
+dfc-core = { path = "../dfc-core" }
+dfc-data-fabric = { path = "../dfc-data-fabric" }
+serde = { workspace = true }
+serde_json = { workspace = true }
+thiserror = { workspace = true }
+
+[dev-dependencies]
+tokio = { workspace = true }

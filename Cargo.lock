@@ -302,6 +302,19 @@ dependencies = [
 ]
 
 [[package]]
+name = "dfc-replay"
+version = "0.1.0"
+dependencies = [
+ "dfc-aivcs",
+ "dfc-core",
+ "dfc-data-fabric",
+ "serde",
+ "serde_json",
+ "thiserror",
+ "tokio",
+]
+
+[[package]]
 name = "dfc-server"
 version = "0.1.0"
 dependencies = [
@@ -312,6 +325,7 @@ dependencies = [
  "dfc-core",
  "dfc-data-fabric",
  "dfc-hitl",
+ "dfc-replay",
  "reqwest",
  "serde",
  "serde_json",
