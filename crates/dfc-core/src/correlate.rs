@@ -71,6 +71,33 @@ pub struct CorrelateRequest {
 }
 
 impl CorrelateRequest {
+    /// Validates E2 canonical mapping fields or E1 legacy flat fields.
+    pub fn validate(&self) -> Result<(), crate::DfcError> {
+        if self.tenant_id.trim().is_empty() {
+            return Err(crate::DfcError::Validation("tenant_id is required".into()));
+        }
+
+        let has_canonical = self.kind.is_some()
+            && non_empty(&self.source_system)
+            && non_empty(&self.source_id)
+            && non_empty(&self.target_system)
+            && non_empty(&self.target_id);
+
+        let has_legacy = non_empty(&self.data_fabric_run_id)
+            || non_empty(&self.data_fabric_task_id)
+            || non_empty(&self.aivcs_snapshot_id)
+            || non_empty(&self.aivcs_branch);
+
+        if !has_canonical && !has_legacy {
+            return Err(crate::DfcError::Validation(
+                "provide kind, source_system, source_id, target_system, target_id \
+                 (or legacy data_fabric_run_id / data_fabric_task_id / aivcs_snapshot_id / aivcs_branch)"
+                    .into(),
+            ));
+        }
+        Ok(())
+    }
+
     pub fn correlation_id(&self) -> CorrelationId {
         if let Some(hash) = self.metadata.get("content_hash").and_then(|v| v.as_str()) {
             return CorrelationId::from_content_hash(&self.tenant_id, hash);
@@ -152,5 +179,104 @@ impl From<CorrelateRequest> for CorrelationRecord {
             aivcs_branch: req.aivcs_branch,
             links: req.metadata,
         }
+    }
+}
+
+fn non_empty(value: &Option<String>) -> bool {
+    value.as_ref().is_some_and(|s| !s.trim().is_empty())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn canonical_request() -> CorrelateRequest {
+        CorrelateRequest {
+            tenant_id: "tenant-a".into(),
+            repo: None,
+            kind: Some(CorrelationKind::Branch),
+            source_system: Some("github".into()),
+            source_id: Some("feature-abc".into()),
+            target_system: Some("aivcs".into()),
+            target_id: Some("branch-abc".into()),
+            data_fabric_run_id: None,
+            data_fabric_task_id: None,
+            aivcs_snapshot_id: None,
+            aivcs_branch: None,
+            metadata: serde_json::json!({ "content_hash": "hash123" }),
+        }
+    }
+
+    #[test]
+    fn validate_accepts_canonical_mapping() {
+        canonical_request()
+            .validate()
+            .expect("valid canonical request");
+    }
+
+    #[test]
+    fn validate_accepts_legacy_flat_fields() {
+        let req = CorrelateRequest {
+            tenant_id: "tenant-a".into(),
+            repo: None,
+            kind: None,
+            source_system: None,
+            source_id: None,
+            target_system: None,
+            target_id: None,
+            data_fabric_run_id: Some("run-1".into()),
+            data_fabric_task_id: None,
+            aivcs_snapshot_id: None,
+            aivcs_branch: None,
+            metadata: serde_json::json!({}),
+        };
+        req.validate().expect("valid legacy request");
+    }
+
+    #[test]
+    fn validate_rejects_empty_mapping() {
+        let req = CorrelateRequest {
+            tenant_id: "tenant-a".into(),
+            repo: None,
+            kind: None,
+            source_system: None,
+            source_id: None,
+            target_system: None,
+            target_id: None,
+            data_fabric_run_id: None,
+            data_fabric_task_id: None,
+            aivcs_snapshot_id: None,
+            aivcs_branch: None,
+            metadata: serde_json::json!({}),
+        };
+        assert!(req.validate().is_err());
+    }
+
+    #[test]
+    fn content_hash_yields_stable_correlation_id() {
+        let req = canonical_request();
+        let id1 = req.correlation_id();
+        let id2 = req.correlation_id();
+        assert_eq!(id1, id2);
+        assert!(id1.0.starts_with("corr_"));
+    }
+
+    #[test]
+    fn derive_is_deterministic_for_same_inputs() {
+        let req = CorrelateRequest {
+            tenant_id: "tenant-a".into(),
+            repo: None,
+            kind: Some(CorrelationKind::Run),
+            source_system: Some("data-fabric".into()),
+            source_id: Some("run-1".into()),
+            target_system: Some("aivcs-api".into()),
+            target_id: Some("snap-1".into()),
+            data_fabric_run_id: None,
+            data_fabric_task_id: None,
+            aivcs_snapshot_id: None,
+            aivcs_branch: None,
+            metadata: serde_json::json!({}),
+        };
+        assert_eq!(req.correlation_id(), req.correlation_id());
     }
 }

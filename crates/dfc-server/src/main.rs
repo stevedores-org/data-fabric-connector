@@ -162,6 +162,8 @@ async fn correlate_create(
         return Err(ApiError::BadRequest("tenant_id is required".into()));
     }
 
+    body.validate().map_err(ApiError::from)?;
+
     let record = CorrelationRecord::from(body);
     state
         .data_fabric
@@ -735,5 +737,15 @@ mod tests {
 
         let resp2 = post_json(&app, "/v1/correlate", "tenant-b", body2).await;
         assert_eq!(resp2.status(), StatusCode::CONFLICT);
+    }
+
+    #[tokio::test]
+    async fn correlate_rejects_empty_mapping() {
+        let app = app();
+        let body = serde_json::json!({
+            "tenant_id": "tenant-a"
+        });
+        let resp = post_json(&app, "/v1/correlate", "tenant-a", body).await;
+        assert_eq!(resp.status(), StatusCode::BAD_REQUEST);
     }
 }

@@ -1,0 +1,11 @@
+{
+  "tenant_id": "tenant-a",
+  "kind": "branch",
+  "source_system": "github",
+  "source_id": "feature-abc",
+  "target_system": "aivcs",
+  "target_id": "branch-abc",
+  "metadata": {
+    "content_hash": "sha256:abc123"
+  }
+}
