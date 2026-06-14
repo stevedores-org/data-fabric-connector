@@ -11,6 +11,7 @@ DFC is a **stateless** Rust service. It normalizes events and correlates IDs bet
 - All event POSTs require `idempotency_key` and `X-Tenant-Id`
 - Mock upstream clients (`MockAivcsClient`, `MockDataFabricClient`) are the E1 default; replace in E6
 - Public FQDN: `dfc.aivcs.io` (`DFC_PUBLIC_FQDN` env, default in code)
+- Production deploy: Crossplane + Flux in `lornu-ai/lornu.ai` (DNS + HTTPRoute); `deploy/base/k8s/` here is the app reference
 
 ## Worktrees
 

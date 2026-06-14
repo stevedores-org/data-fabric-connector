@@ -38,7 +38,14 @@ curl localhost:8080/healthz
 curl localhost:8080/v1/version
 ```
 
-**Production FQDN:** `https://dfc.aivcs.io` (Gateway API → `shared-tls-gateway`, listener `https-aivcs-io-wildcard`).
+**Production FQDN:** `https://dfc.aivcs.io`
+
+DNS (Cloudflare) and GitOps (Crossplane → Flux on `lornu-gke-prod`) live in **lornu.ai**. Gateway: `shared-tls-gateway` / `https-aivcs-io-wildcard`. See [`deploy/README.md`](deploy/README.md).
+
+```bash
+curl -sS https://dfc.aivcs.io/healthz
+curl -sS https://dfc.aivcs.io/v1/version
+```
 
 E1 uses in-memory mock upstreams. Set `DATA_FABRIC_TENANT_ID` when wiring real clients (E6).
 

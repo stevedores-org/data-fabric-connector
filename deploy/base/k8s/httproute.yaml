@@ -1,3 +1,6 @@
+# Canonical HTTPRoute for dfc.aivcs.io.
+# Production reconcile: lornu-ai/lornu.ai (Crossplane + Flux on lornu-gke-prod).
+# Keep in sync with the Flux-deployed copy when changing hostnames or backend ports.
 apiVersion: gateway.networking.k8s.io/v1
 kind: HTTPRoute
 metadata:
@@ -6,6 +9,7 @@ metadata:
   labels:
     app.kubernetes.io/name: dfc
     app.kubernetes.io/part-of: aivcs
+    lornu.ai/managed-by: flux
 spec:
   parentRefs:
     - name: shared-tls-gateway
