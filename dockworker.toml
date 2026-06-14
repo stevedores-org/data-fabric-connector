@@ -1,0 +1,63 @@
+# dockworker.toml — OCI manifest for data-fabric-connector (dfc)
+#
+# No Dockerfile. CI: `nix build .#dfc-image` → skopeo push to GAR.
+
+[package]
+name = "dfc"
+version = "0.1.0"
+description = "Stateless anti-corruption layer between AIVCS, HITL, and data-fabric"
+runtime = "rust"
+
+[oci]
+spec = "1.0"
+builder = "nix"
+nix_output = "dfc-image"
+
+[oci.image]
+authors = ["Stevedores Org <engineering@stevedores.org>"]
+url = "https://github.com/stevedores-org/data-fabric-connector"
+source = "https://github.com/stevedores-org/data-fabric-connector"
+vendor = "stevedores-org"
+licenses = "Apache-2.0"
+title = "dfc"
+
+[oci.image.labels]
+"lornu.ai/component" = "data-fabric-connector"
+"lornu.ai/managed-by" = "dockworker"
+"lornu.ai/runtime" = "rust"
+"lornu.ai/team" = "platform"
+"stevedores.org/fqdn" = "dfc.aivcs.io"
+
+[oci.config]
+user = "nonroot:nonroot"
+entrypoint = ["/dfc-server"]
+expose = ["8080/tcp"]
+stop_signal = "SIGTERM"
+
+[oci.config.env]
+RUST_LOG = "info"
+DFC_HOST = "0.0.0.0"
+DFC_PORT = "8080"
+DFC_PUBLIC_FQDN = "dfc.aivcs.io"
+
+[build]
+runtime = "rust"
+engine = "nix"
+
+[oci.platforms]
+architectures = ["amd64"]
+
+[oci.security]
+read_only_rootfs = true
+no_new_privileges = true
+drop_capabilities = ["ALL"]
+
+[registry]
+url = "us-central1-docker.pkg.dev/gcp-lornu-ai/lornu"
+name = "dfc"
+tags = ["0.1.0", "main"]
+
+[deploy]
+targets = ["kubernetes"]
+namespace = "dfc"
+replicas = 1
