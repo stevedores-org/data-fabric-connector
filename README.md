@@ -78,6 +78,15 @@ On macOS, build the image via a Linux remote builder or CI — same pattern as `
 
 All mutating routes require `X-Tenant-Id`.
 
+## Branching
+
+| Branch | Purpose |
+|--------|---------|
+| `develop` | Integration — target for feature PRs |
+| `main` | Production releases — merge from `develop` |
+
+CI runs on pushes and PRs to both branches (see `.github/workflows/ci.yml`).
+
 ## License
 
 Apache-2.0
