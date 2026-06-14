@@ -174,18 +174,27 @@ pub struct MockAivcsClient;
 #[async_trait]
 impl AivcsClient for MockAivcsClient {
     async fn request_replay(&self, req: &ReplayRequest) -> Result<ReplayResponse, DfcError> {
+        let mut snapshot_ids = Vec::new();
+        if let Some(ref from) = req.from_snapshot {
+            snapshot_ids.push(from.clone());
+        }
+        let target = req
+            .to_snapshot
+            .clone()
+            .or_else(|| req.target_snapshot_id.clone());
+        if let Some(to) = target {
+            if snapshot_ids.last() != Some(&to) {
+                snapshot_ids.push(to);
+            }
+        }
+
         Ok(ReplayResponse {
             replay_id: format!(
                 "replay_{}",
                 &req.idempotency_key[..8.min(req.idempotency_key.len())]
             ),
             status: "accepted".into(),
-            snapshot_ids: req
-                .from_snapshot
-                .clone()
-                .into_iter()
-                .chain(req.to_snapshot.clone())
-                .collect(),
+            snapshot_ids,
             data_fabric_event_id: None,
             aivcs_operation_id: Some("aivcs_op_stub".into()),
         })

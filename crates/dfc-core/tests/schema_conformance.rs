@@ -71,6 +71,44 @@ fn hitl_review_bundle_fixture_matches_schema() {
 }
 
 #[test]
+fn replay_request_fixture_matches_schema() {
+    let schema_path = schema_dir().join("replay-request.schema.json");
+    let fixture_path = schema_dir().join("fixtures/replay-request.v1.json");
+
+    let schema: Value =
+        serde_json::from_str(&fs::read_to_string(schema_path).expect("read schema"))
+            .expect("parse schema");
+    let instance: Value =
+        serde_json::from_str(&fs::read_to_string(fixture_path).expect("read fixture"))
+            .expect("parse fixture");
+
+    let validator = Validator::new(&schema).expect("compile schema");
+    let result = validator.validate(&instance);
+    if let Err(errors) = result {
+        panic!("fixture failed validation: {errors:?}");
+    }
+}
+
+#[test]
+fn rollback_request_fixture_matches_schema() {
+    let schema_path = schema_dir().join("rollback-request.schema.json");
+    let fixture_path = schema_dir().join("fixtures/rollback-request.v1.json");
+
+    let schema: Value =
+        serde_json::from_str(&fs::read_to_string(schema_path).expect("read schema"))
+            .expect("parse schema");
+    let instance: Value =
+        serde_json::from_str(&fs::read_to_string(fixture_path).expect("read fixture"))
+            .expect("parse fixture");
+
+    let validator = Validator::new(&schema).expect("compile schema");
+    let result = validator.validate(&instance);
+    if let Err(errors) = result {
+        panic!("fixture failed validation: {errors:?}");
+    }
+}
+
+#[test]
 fn serialized_dfc_event_round_trips_schema_fields() {
     let event = DfcEvent::new(
         "aivcs.snapshot.created",

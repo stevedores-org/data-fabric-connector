@@ -1,0 +1,7 @@
+{
+  "tenant_id": "tenant-a",
+  "run_id": "run-123",
+  "task_id": "task-456",
+  "target_snapshot_id": "snap_target",
+  "idempotency_key": "replay-key-1"
+}

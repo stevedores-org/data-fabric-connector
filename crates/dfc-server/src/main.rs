@@ -14,6 +14,7 @@ use dfc_data_fabric::{DataFabricClient, EventIngestService, IngestOutcome, MockD
 use dfc_hitl::{
     HitlReviewBundle, ReviewBundleAssembler, ReviewDecisionRequest, ReviewDecisionResponse,
 };
+use dfc_replay::{AuditContext, ReplayBridge};
 use serde::{Deserialize, Serialize};
 use std::sync::Arc;
 use tower_http::trace::TraceLayer;
@@ -144,6 +145,15 @@ fn tenant_from_headers(headers: &HeaderMap) -> Result<TenantContext, ApiError> {
         .and_then(|v| v.to_str().ok())
         .map(|s| TenantContext::new(s.to_string()))
         .ok_or_else(|| ApiError::BadRequest("X-Tenant-Id header is required".into()))
+}
+
+fn actor_from_headers(headers: &HeaderMap) -> String {
+    headers
+        .get("x-actor")
+        .and_then(|v| v.to_str().ok())
+        .filter(|s| !s.trim().is_empty())
+        .unwrap_or("system")
+        .to_string()
 }
 
 async fn correlate_create(
@@ -377,40 +387,9 @@ async fn replay_request(
     let tenant = tenant_from_headers(&headers)?;
     tenant.ensure(&body.tenant_id)?;
 
-    if body.idempotency_key.trim().is_empty() {
-        return Err(ApiError::BadRequest("idempotency_key is required".into()));
-    }
-
-    let mut requested = dfc_core::DfcEvent::new(
-        "aivcs.replay.requested",
-        body.tenant_id.clone(),
-        format!("{}:requested", body.idempotency_key),
-        dfc_core::SourceSystem::AivcsApi,
-    );
-    requested.run_id = Some(body.run_id.clone());
-    requested.task_id = body.task_id.clone();
-    state
-        .data_fabric
-        .ingest_event(&requested)
-        .await
-        .map_err(ApiError::from)?;
-
-    let response = state
-        .aivcs
-        .request_replay(&body)
-        .await
-        .map_err(ApiError::from)?;
-
-    let mut completed = dfc_core::DfcEvent::new(
-        "aivcs.replay.completed",
-        body.tenant_id,
-        format!("{}:completed", body.idempotency_key),
-        dfc_core::SourceSystem::AivcsApi,
-    );
-    completed.run_id = Some(body.run_id);
-    state
-        .data_fabric
-        .ingest_event(&completed)
+    let bridge = ReplayBridge::new(state.data_fabric.clone(), state.aivcs.clone());
+    let response = bridge
+        .handle_replay(AuditContext::new(actor_from_headers(&headers), None), body)
         .await
         .map_err(ApiError::from)?;
 
@@ -425,30 +404,9 @@ async fn rollback_request(
     let tenant = tenant_from_headers(&headers)?;
     tenant.ensure(&body.tenant_id)?;
 
-    if body.idempotency_key.trim().is_empty() {
-        return Err(ApiError::BadRequest("idempotency_key is required".into()));
-    }
-
-    let response = state
-        .aivcs
-        .request_rollback(&body)
-        .await
-        .map_err(ApiError::from)?;
-
-    let mut event = dfc_core::DfcEvent::new(
-        "aivcs.rollback.requested",
-        body.tenant_id,
-        body.idempotency_key,
-        dfc_core::SourceSystem::AivcsApi,
-    );
-    event.metadata = serde_json::json!({
-        "branch_id": body.branch_id,
-        "target_snapshot_id": body.target_snapshot_id,
-        "reason": body.reason,
-    });
-    state
-        .data_fabric
-        .ingest_event(&event)
+    let bridge = ReplayBridge::new(state.data_fabric.clone(), state.aivcs.clone());
+    let response = bridge
+        .handle_rollback(AuditContext::new(actor_from_headers(&headers), None), body)
         .await
         .map_err(ApiError::from)?;
 
@@ -521,6 +479,8 @@ mod tests {
                 "/v1/hitl/reviews/{review_id}/decision",
                 post(hitl_review_decision),
             )
+            .route("/v1/replay/request", post(replay_request))
+            .route("/v1/rollback/request", post(rollback_request))
             .with_state(state)
     }
 
@@ -912,5 +872,139 @@ mod tests {
         .unwrap();
         assert_eq!(bundle.revision, 2);
         assert_eq!(etag, "\"rev-2\"");
+    }
+
+    async fn correlate_run(app: &Router, run_id: &str, snapshot_id: &str) {
+        let correlate = serde_json::json!({
+            "tenant_id": "tenant-a",
+            "data_fabric_run_id": run_id,
+            "aivcs_snapshot_id": snapshot_id
+        });
+        let resp = post_json(app, "/v1/correlate", "tenant-a", correlate).await;
+        assert_eq!(resp.status(), StatusCode::OK);
+    }
+
+    async fn correlate_branch(app: &Router, branch_id: &str) {
+        let correlate = serde_json::json!({
+            "tenant_id": "tenant-a",
+            "kind": "branch",
+            "source_system": "aivcs",
+            "source_id": branch_id,
+            "target_system": "aivcs",
+            "target_id": branch_id,
+            "aivcs_branch": branch_id
+        });
+        let resp = post_json(app, "/v1/correlate", "tenant-a", correlate).await;
+        assert_eq!(resp.status(), StatusCode::OK);
+    }
+
+    #[tokio::test]
+    async fn replay_request_resolves_lineage_and_audits_events() {
+        let app = app();
+        correlate_run(&app, "run-e5", "snap_base").await;
+
+        let body = serde_json::json!({
+            "tenant_id": "tenant-a",
+            "run_id": "run-e5",
+            "target_snapshot_id": "snap_target",
+            "idempotency_key": "replay-e5-1"
+        });
+        let resp = app
+            .clone()
+            .oneshot(
+                Request::post("/v1/replay/request")
+                    .header("x-tenant-id", "tenant-a")
+                    .header("x-actor", "operator-1")
+                    .header("content-type", "application/json")
+                    .body(Body::from(body.to_string()))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
+
+        let replay: dfc_core::ReplayResponse = serde_json::from_slice(
+            &axum::body::to_bytes(resp.into_body(), usize::MAX)
+                .await
+                .unwrap(),
+        )
+        .unwrap();
+        assert!(replay.replay_id.starts_with("replay_"));
+        assert_eq!(replay.snapshot_ids, vec!["snap_base", "snap_target"]);
+        assert!(replay.data_fabric_event_id.is_some());
+
+        let duplicate = post_json(
+            &app,
+            "/v1/replay/request",
+            "tenant-a",
+            serde_json::json!({
+                "tenant_id": "tenant-a",
+                "run_id": "run-e5",
+                "target_snapshot_id": "snap_target",
+                "idempotency_key": "replay-e5-1"
+            }),
+        )
+        .await;
+        assert_eq!(duplicate.status(), StatusCode::OK);
+        let replay2: dfc_core::ReplayResponse = serde_json::from_slice(
+            &axum::body::to_bytes(duplicate.into_body(), usize::MAX)
+                .await
+                .unwrap(),
+        )
+        .unwrap();
+        assert_eq!(replay2.replay_id, replay.replay_id);
+    }
+
+    #[tokio::test]
+    async fn rollback_request_records_audit_trail_before_aivcs() {
+        let app = app();
+        correlate_branch(&app, "branch-e5").await;
+
+        let body = serde_json::json!({
+            "tenant_id": "tenant-a",
+            "branch_id": "branch-e5",
+            "target_snapshot_id": "snap_rollback",
+            "reason": "manual operator rollback",
+            "idempotency_key": "rollback-e5-1"
+        });
+        let resp = app
+            .clone()
+            .oneshot(
+                Request::post("/v1/rollback/request")
+                    .header("x-tenant-id", "tenant-a")
+                    .header("x-actor", "operator-1")
+                    .header("content-type", "application/json")
+                    .body(Body::from(body.to_string()))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
+
+        let rollback: dfc_core::RollbackResponse = serde_json::from_slice(
+            &axum::body::to_bytes(resp.into_body(), usize::MAX)
+                .await
+                .unwrap(),
+        )
+        .unwrap();
+        assert!(rollback.rollback_id.starts_with("rollback_"));
+        assert!(rollback.data_fabric_event_id.is_some());
+    }
+
+    #[tokio::test]
+    async fn replay_request_rejects_empty_run_id() {
+        let app = app();
+        let resp = post_json(
+            &app,
+            "/v1/replay/request",
+            "tenant-a",
+            serde_json::json!({
+                "tenant_id": "tenant-a",
+                "run_id": "   ",
+                "idempotency_key": "bad-replay"
+            }),
+        )
+        .await;
+        assert_eq!(resp.status(), StatusCode::BAD_REQUEST);
     }
 }

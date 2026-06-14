@@ -7,6 +7,7 @@ use std::sync::Arc;
 use tokio::sync::RwLock;
 
 use crate::config::DataFabricConfig;
+use crate::lineage::SnapshotLineage;
 use crate::review::DataFabricReviewFragment;
 
 #[async_trait]
@@ -32,6 +33,13 @@ pub trait DataFabricClient: Send + Sync {
         tenant_id: &str,
         review_id: &str,
     ) -> Result<DataFabricReviewFragment, DfcError>;
+    async fn resolve_snapshot_lineage(
+        &self,
+        tenant_id: &str,
+        run_id: &str,
+        task_id: Option<&str>,
+        target_snapshot_id: Option<&str>,
+    ) -> Result<SnapshotLineage, DfcError>;
 }
 
 pub struct HttpDataFabricClient {
@@ -257,6 +265,43 @@ impl DataFabricClient for HttpDataFabricClient {
             message: e.to_string(),
         })
     }
+
+    async fn resolve_snapshot_lineage(
+        &self,
+        tenant_id: &str,
+        run_id: &str,
+        task_id: Option<&str>,
+        target_snapshot_id: Option<&str>,
+    ) -> Result<SnapshotLineage, DfcError> {
+        let url = format!(
+            "{}/v1/runs/{}/snapshot-lineage",
+            self.config.base_url.trim_end_matches('/'),
+            run_id
+        );
+        let mut req = self.http.get(&url).header("X-Tenant-Id", tenant_id);
+        if let Some(task_id) = task_id {
+            req = req.query(&[("task_id", task_id)]);
+        }
+        if let Some(target_snapshot_id) = target_snapshot_id {
+            req = req.query(&[("target_snapshot_id", target_snapshot_id)]);
+        }
+        let resp = req.send().await.map_err(|e| DfcError::Upstream {
+            system: "data-fabric".into(),
+            message: e.to_string(),
+        })?;
+
+        if !resp.status().is_success() {
+            return Err(DfcError::Upstream {
+                system: "data-fabric".into(),
+                message: format!("status {}", resp.status()),
+            });
+        }
+
+        resp.json().await.map_err(|e| DfcError::Upstream {
+            system: "data-fabric".into(),
+            message: e.to_string(),
+        })
+    }
 }
 
 type CorrelationKey = (String, String, String);
@@ -362,6 +407,48 @@ impl DataFabricClient for MockDataFabricClient {
                 "review_id": review_id,
                 "checks": ["lint", "policy"]
             })),
+        })
+    }
+
+    async fn resolve_snapshot_lineage(
+        &self,
+        tenant_id: &str,
+        run_id: &str,
+        _task_id: Option<&str>,
+        target_snapshot_id: Option<&str>,
+    ) -> Result<SnapshotLineage, DfcError> {
+        let correlation = self.get_correlation(tenant_id, "run", run_id).await.ok();
+        let from_snapshot = correlation
+            .as_ref()
+            .and_then(|record| record.aivcs_snapshot_id.clone());
+        let to_snapshot = target_snapshot_id
+            .map(str::to_string)
+            .or_else(|| from_snapshot.clone());
+
+        let mut snapshot_ids = Vec::new();
+        if let Some(ref from) = from_snapshot {
+            snapshot_ids.push(from.clone());
+        }
+        if let Some(ref to) = to_snapshot {
+            if snapshot_ids.last() != Some(to) {
+                snapshot_ids.push(to.clone());
+            }
+        }
+        if snapshot_ids.is_empty() {
+            snapshot_ids.push(format!("snap_{run_id}"));
+            if let Some(target) = target_snapshot_id {
+                let target = target.to_string();
+                if snapshot_ids.last() != Some(&target) {
+                    snapshot_ids.push(target);
+                }
+            }
+        }
+
+        Ok(SnapshotLineage {
+            correlation_id: correlation.map(|record| record.correlation_id.clone()),
+            snapshot_ids,
+            from_snapshot,
+            to_snapshot,
         })
     }
 }
