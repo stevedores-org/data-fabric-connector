@@ -11,9 +11,7 @@ use dfc_core::{
     InboundHitlEvent, ReplayRequest, RollbackRequest, TenantContext, SCHEMA_VERSION,
 };
 use dfc_data_fabric::{DataFabricClient, EventIngestService, IngestOutcome, MockDataFabricClient};
-use dfc_hitl::{
-    ReviewBundleAssembler, ReviewDecisionRequest, ReviewDecisionResponse,
-};
+use dfc_hitl::{ReviewBundleAssembler, ReviewDecisionRequest, ReviewDecisionResponse};
 use dfc_replay::{AuditContext, ReplayBridge};
 use serde::{Deserialize, Serialize};
 use std::sync::Arc;
