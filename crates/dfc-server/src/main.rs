@@ -10,12 +10,12 @@ use dfc_core::{
     CorrelateRequest, CorrelationKind, CorrelationRecord, DfcError, InboundAivcsEvent,
     InboundHitlEvent, ReplayRequest, RollbackRequest, TenantContext, SCHEMA_VERSION,
 };
-use dfc_data_fabric::{DataFabricClient, MockDataFabricClient};
+use dfc_data_fabric::{DataFabricClient, EventIngestService, IngestOutcome, MockDataFabricClient};
 use dfc_hitl::{
     HitlReviewBundle, ReviewBundleAssembler, ReviewDecision, ReviewDecisionRequest,
     ReviewDecisionResponse,
 };
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 use std::sync::Arc;
 use tower_http::trace::TraceLayer;
 use tracing::info;
@@ -30,6 +30,7 @@ struct AppState {
     public_fqdn: String,
     public_url: String,
     data_fabric: Arc<MockDataFabricClient>,
+    ingest: Arc<EventIngestService<MockDataFabricClient>>,
     aivcs: Arc<MockAivcsClient>,
 }
 
@@ -48,9 +49,16 @@ struct ReadinessResponse {
     mode: &'static str,
 }
 
-#[derive(Serialize)]
+#[derive(Serialize, Deserialize)]
 struct IngestResponse {
     event: dfc_core::DfcEvent,
+}
+
+#[derive(Serialize)]
+struct StagedIngestResponse {
+    staged: bool,
+    event_id: String,
+    pending: Vec<dfc_core::PendingCorrelation>,
 }
 
 #[derive(Serialize)]
@@ -73,11 +81,15 @@ async fn main() -> anyhow::Result<()> {
         "dfc-server starting"
     );
 
+    let data_fabric = Arc::new(MockDataFabricClient::default());
+    let ingest = Arc::new(EventIngestService::new(data_fabric.clone()));
+
     let state = AppState {
         git_sha: option_env!("GIT_SHA").unwrap_or("dev"),
         public_fqdn: cfg.public_fqdn.clone(),
         public_url: cfg.public_url(),
-        data_fabric: Arc::new(MockDataFabricClient::default()),
+        data_fabric,
+        ingest,
         aivcs: Arc::new(MockAivcsClient),
     };
 
@@ -156,7 +168,35 @@ async fn correlate_create(
         .store_correlation(&record)
         .await
         .map_err(ApiError::from)?;
+
+    reconcile_record(&state, &record).await?;
+
     Ok(Json(record))
+}
+
+async fn reconcile_record(state: &AppState, record: &CorrelationRecord) -> Result<(), ApiError> {
+    if let Some(run_id) = &record.data_fabric_run_id {
+        state
+            .ingest
+            .reconcile_correlation(&record.tenant_id, "run", run_id)
+            .await
+            .map_err(ApiError::from)?;
+    }
+    if let Some(snapshot_id) = &record.aivcs_snapshot_id {
+        state
+            .ingest
+            .reconcile_correlation(&record.tenant_id, "snapshot", snapshot_id)
+            .await
+            .map_err(ApiError::from)?;
+    }
+    if let Some(review_id) = record.links.get("review_id").and_then(|v| v.as_str()) {
+        state
+            .ingest
+            .reconcile_correlation(&record.tenant_id, "review", review_id)
+            .await
+            .map_err(ApiError::from)?;
+    }
+    Ok(())
 }
 
 async fn correlate_get(
@@ -182,7 +222,7 @@ async fn events_aivcs(
     State(state): State<AppState>,
     headers: HeaderMap,
     Json(body): Json<InboundAivcsEvent>,
-) -> Result<Json<IngestResponse>, ApiError> {
+) -> Result<impl IntoResponse, ApiError> {
     let tenant = tenant_from_headers(&headers)?;
     tenant.ensure(&body.tenant_id)?;
 
@@ -190,21 +230,19 @@ async fn events_aivcs(
         return Err(ApiError::BadRequest("idempotency_key is required".into()));
     }
 
-    let event = body.into_dfc_event();
-    event.validate().map_err(ApiError::from)?;
-    let stored = state
-        .data_fabric
-        .ingest_event(&event)
+    let outcome = state
+        .ingest
+        .ingest_aivcs(body)
         .await
         .map_err(ApiError::from)?;
-    Ok(Json(IngestResponse { event: stored }))
+    Ok(ingest_outcome_response(outcome))
 }
 
 async fn events_hitl(
     State(state): State<AppState>,
     headers: HeaderMap,
     Json(body): Json<InboundHitlEvent>,
-) -> Result<Json<IngestResponse>, ApiError> {
+) -> Result<impl IntoResponse, ApiError> {
     let tenant = tenant_from_headers(&headers)?;
     tenant.ensure(&body.tenant_id)?;
 
@@ -212,14 +250,29 @@ async fn events_hitl(
         return Err(ApiError::BadRequest("idempotency_key is required".into()));
     }
 
-    let event = body.into_dfc_event();
-    event.validate().map_err(ApiError::from)?;
-    let stored = state
-        .data_fabric
-        .ingest_event(&event)
+    let outcome = state
+        .ingest
+        .ingest_hitl(body)
         .await
         .map_err(ApiError::from)?;
-    Ok(Json(IngestResponse { event: stored }))
+    Ok(ingest_outcome_response(outcome))
+}
+
+fn ingest_outcome_response(outcome: IngestOutcome) -> Response {
+    match outcome {
+        IngestOutcome::Ingested(event) => {
+            (StatusCode::OK, Json(IngestResponse { event: *event })).into_response()
+        }
+        IngestOutcome::Staged { event_id, pending } => (
+            StatusCode::ACCEPTED,
+            Json(StagedIngestResponse {
+                staged: true,
+                event_id: event_id.0,
+                pending,
+            }),
+        )
+            .into_response(),
+    }
 }
 
 async fn hitl_review_get(
@@ -414,17 +467,41 @@ mod tests {
     use tower::ServiceExt;
 
     fn app() -> Router {
+        let data_fabric = Arc::new(MockDataFabricClient::default());
+        let ingest = Arc::new(EventIngestService::new(data_fabric.clone()));
         let state = AppState {
             git_sha: "test",
             public_fqdn: config::DEFAULT_PUBLIC_FQDN.into(),
             public_url: format!("https://{}", config::DEFAULT_PUBLIC_FQDN),
-            data_fabric: Arc::new(MockDataFabricClient::default()),
+            data_fabric,
+            ingest,
             aivcs: Arc::new(MockAivcsClient),
         };
         Router::new()
             .route("/healthz", get(healthz))
             .route("/v1/version", get(version))
+            .route("/v1/correlate", post(correlate_create))
+            .route("/v1/events/aivcs", post(events_aivcs))
+            .route("/v1/events/hitl", post(events_hitl))
             .with_state(state)
+    }
+
+    async fn post_json(
+        app: &Router,
+        path: &str,
+        tenant: &str,
+        body: serde_json::Value,
+    ) -> axum::response::Response {
+        app.clone()
+            .oneshot(
+                Request::post(path)
+                    .header("x-tenant-id", tenant)
+                    .header("content-type", "application/json")
+                    .body(Body::from(body.to_string()))
+                    .unwrap(),
+            )
+            .await
+            .unwrap()
     }
 
     #[tokio::test]
@@ -443,5 +520,112 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(resp.status(), StatusCode::OK);
+    }
+
+    #[tokio::test]
+    async fn aivcs_event_requires_idempotency_key() {
+        let app = app();
+        let resp = post_json(
+            &app,
+            "/v1/events/aivcs",
+            "tenant-a",
+            serde_json::json!({
+                "event_type": "aivcs.snapshot.created",
+                "tenant_id": "tenant-a",
+                "idempotency_key": "   "
+            }),
+        )
+        .await;
+        assert_eq!(resp.status(), StatusCode::BAD_REQUEST);
+    }
+
+    #[tokio::test]
+    async fn aivcs_duplicate_idempotency_returns_same_event_id() {
+        let app = app();
+        let body = serde_json::json!({
+            "event_type": "aivcs.snapshot.created",
+            "tenant_id": "tenant-a",
+            "idempotency_key": "snap-key-1",
+            "aivcs_ref": "aivcs:snapshot:snap_1",
+            "run_id": "run-1"
+        });
+
+        let first = post_json(&app, "/v1/events/aivcs", "tenant-a", body.clone()).await;
+        assert_eq!(first.status(), StatusCode::OK);
+        let first_body: IngestResponse = serde_json::from_slice(
+            &axum::body::to_bytes(first.into_body(), usize::MAX)
+                .await
+                .unwrap(),
+        )
+        .unwrap();
+
+        let second = post_json(&app, "/v1/events/aivcs", "tenant-a", body).await;
+        assert_eq!(second.status(), StatusCode::OK);
+        let second_body: IngestResponse = serde_json::from_slice(
+            &axum::body::to_bytes(second.into_body(), usize::MAX)
+                .await
+                .unwrap(),
+        )
+        .unwrap();
+
+        assert_eq!(first_body.event.event_id, second_body.event.event_id);
+    }
+
+    #[tokio::test]
+    async fn branch_created_before_snapshot_is_staged_then_reconciled() {
+        let app = app();
+        let branch = serde_json::json!({
+            "event_type": "aivcs.branch.created",
+            "tenant_id": "tenant-a",
+            "idempotency_key": "branch-key-1",
+            "metadata": { "parent_snapshot_id": "snap_parent" }
+        });
+        let staged = post_json(&app, "/v1/events/aivcs", "tenant-a", branch.clone()).await;
+        assert_eq!(staged.status(), StatusCode::ACCEPTED);
+
+        let duplicate = post_json(&app, "/v1/events/aivcs", "tenant-a", branch).await;
+        assert_eq!(duplicate.status(), StatusCode::ACCEPTED);
+
+        let snapshot = serde_json::json!({
+            "event_type": "aivcs.snapshot.created",
+            "tenant_id": "tenant-a",
+            "idempotency_key": "snap-key-parent",
+            "aivcs_ref": "aivcs:snapshot:snap_parent",
+            "run_id": "run-1"
+        });
+        let ingested = post_json(&app, "/v1/events/aivcs", "tenant-a", snapshot).await;
+        assert_eq!(ingested.status(), StatusCode::OK);
+    }
+
+    #[tokio::test]
+    async fn hitl_event_enriches_run_id_from_review_correlation() {
+        let app = app();
+        let correlate = serde_json::json!({
+            "tenant_id": "tenant-a",
+            "data_fabric_run_id": "run-123",
+            "metadata": { "review_id": "rev-1" }
+        });
+        let correlate_resp = post_json(&app, "/v1/correlate", "tenant-a", correlate).await;
+        assert_eq!(correlate_resp.status(), StatusCode::OK);
+
+        let hitl = serde_json::json!({
+            "event_type": "hitl.review.opened",
+            "tenant_id": "tenant-a",
+            "idempotency_key": "hitl-key-1",
+            "review_id": "rev-1"
+        });
+        let resp = post_json(&app, "/v1/events/hitl", "tenant-a", hitl).await;
+        assert_eq!(resp.status(), StatusCode::OK);
+        let body: IngestResponse = serde_json::from_slice(
+            &axum::body::to_bytes(resp.into_body(), usize::MAX)
+                .await
+                .unwrap(),
+        )
+        .unwrap();
+        assert_eq!(body.event.run_id.as_deref(), Some("run-123"));
+        assert_eq!(
+            body.event.source_system,
+            dfc_core::SourceSystem::AivcsHumanInTheLoop
+        );
     }
 }
