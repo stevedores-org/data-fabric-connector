@@ -46,7 +46,9 @@ impl<C: DataFabricClient> ReviewBundleAssembler<C> {
             review_id: review_id.into(),
             tenant_id: tenant_id.into(),
             correlation_id: correlation.as_ref().map(|c| c.correlation_id.clone()),
-            run_id: correlation.as_ref().and_then(|c| c.data_fabric_run_id.clone()),
+            run_id: correlation
+                .as_ref()
+                .and_then(|c| c.data_fabric_run_id.clone()),
             task_id: correlation
                 .as_ref()
                 .and_then(|c| c.data_fabric_task_id.clone()),
@@ -54,9 +56,7 @@ impl<C: DataFabricClient> ReviewBundleAssembler<C> {
                 .as_ref()
                 .and_then(|c| c.aivcs_snapshot_id.clone())
                 .map(|s| format!("aivcs:snapshot:{s}")),
-            branch_ref: correlation
-                .as_ref()
-                .and_then(|c| c.aivcs_branch.clone()),
+            branch_ref: correlation.as_ref().and_then(|c| c.aivcs_branch.clone()),
             diff_ref: None,
             validation_result: None,
             evidence_graph_ref: None,

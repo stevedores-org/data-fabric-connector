@@ -18,14 +18,12 @@ fn dfc_event_fixture_matches_schema() {
     let schema_path = schema_dir().join("dfc-event.schema.json");
     let fixture_path = schema_dir().join("fixtures/dfc-event.v1.json");
 
-    let schema: Value = serde_json::from_str(
-        &fs::read_to_string(schema_path).expect("read schema"),
-    )
-    .expect("parse schema");
-    let instance: Value = serde_json::from_str(
-        &fs::read_to_string(fixture_path).expect("read fixture"),
-    )
-    .expect("parse fixture");
+    let schema: Value =
+        serde_json::from_str(&fs::read_to_string(schema_path).expect("read schema"))
+            .expect("parse schema");
+    let instance: Value =
+        serde_json::from_str(&fs::read_to_string(fixture_path).expect("read fixture"))
+            .expect("parse fixture");
 
     let validator = Validator::new(&schema).expect("compile schema");
     let result = validator.validate(&instance);

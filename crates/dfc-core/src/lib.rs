@@ -12,9 +12,7 @@ pub mod tenant;
 
 pub use correlate::{CorrelateRequest, CorrelationKind, CorrelationRecord};
 pub use error::DfcError;
-pub use event::{
-    DfcEvent, InboundAivcsEvent, InboundHitlEvent, SourceSystem,
-};
+pub use event::{DfcEvent, InboundAivcsEvent, InboundHitlEvent, SourceSystem};
 pub use ids::{CorrelationId, EventId};
 pub use replay::{ReplayMode, ReplayRequest, ReplayResponse, RollbackRequest, RollbackResponse};
 pub use tenant::TenantContext;

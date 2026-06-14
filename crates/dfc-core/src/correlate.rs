@@ -76,11 +76,7 @@ impl CorrelateRequest {
             return CorrelationId::from_content_hash(&self.tenant_id, hash);
         }
 
-        let kind = self
-            .kind
-            .map(|k| k.as_str())
-            .unwrap_or("run")
-            .to_string();
+        let kind = self.kind.map(|k| k.as_str()).unwrap_or("run").to_string();
         let source_system = self
             .source_system
             .clone()

@@ -78,9 +78,7 @@ impl DfcEvent {
             )));
         }
         if self.tenant_id.trim().is_empty() {
-            return Err(crate::DfcError::Validation(
-                "tenant_id is required".into(),
-            ));
+            return Err(crate::DfcError::Validation("tenant_id is required".into()));
         }
         if self.idempotency_key.trim().is_empty() {
             return Err(crate::DfcError::Validation(
@@ -88,9 +86,7 @@ impl DfcEvent {
             ));
         }
         if self.event_type.trim().is_empty() {
-            return Err(crate::DfcError::Validation(
-                "event_type is required".into(),
-            ));
+            return Err(crate::DfcError::Validation("event_type is required".into()));
         }
         Ok(())
     }

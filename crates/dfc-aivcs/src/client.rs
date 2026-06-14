@@ -94,7 +94,10 @@ pub struct MockAivcsClient;
 impl AivcsClient for MockAivcsClient {
     async fn request_replay(&self, req: &ReplayRequest) -> Result<ReplayResponse, DfcError> {
         Ok(ReplayResponse {
-            replay_id: format!("replay_{}", &req.idempotency_key[..8.min(req.idempotency_key.len())]),
+            replay_id: format!(
+                "replay_{}",
+                &req.idempotency_key[..8.min(req.idempotency_key.len())]
+            ),
             status: "accepted".into(),
             snapshot_ids: req
                 .from_snapshot

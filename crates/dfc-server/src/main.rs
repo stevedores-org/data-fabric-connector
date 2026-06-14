@@ -8,7 +8,7 @@ use axum::{
 use dfc_aivcs::{AivcsClient, MockAivcsClient};
 use dfc_core::{
     CorrelateRequest, CorrelationKind, CorrelationRecord, DfcError, InboundAivcsEvent,
-    InboundHitlEvent, ReplayRequest, RollbackRequest, SCHEMA_VERSION, TenantContext,
+    InboundHitlEvent, ReplayRequest, RollbackRequest, TenantContext, SCHEMA_VERSION,
 };
 use dfc_data_fabric::{DataFabricClient, MockDataFabricClient};
 use dfc_hitl::{
@@ -62,8 +62,7 @@ struct ErrorBody {
 async fn main() -> anyhow::Result<()> {
     tracing_subscriber::fmt()
         .with_env_filter(
-            tracing_subscriber::EnvFilter::from_default_env()
-                .add_directive("dfc=info".parse()?),
+            tracing_subscriber::EnvFilter::from_default_env().add_directive("dfc=info".parse()?),
         )
         .init();
 

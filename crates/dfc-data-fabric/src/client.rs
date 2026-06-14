@@ -36,10 +36,7 @@ impl HttpDataFabricClient {
 #[async_trait]
 impl DataFabricClient for HttpDataFabricClient {
     async fn ingest_event(&self, event: &DfcEvent) -> Result<DfcEvent, DfcError> {
-        let url = format!(
-            "{}/v1/events",
-            self.config.base_url.trim_end_matches('/')
-        );
+        let url = format!("{}/v1/events", self.config.base_url.trim_end_matches('/'));
         let resp = self
             .http
             .post(&url)
