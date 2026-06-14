@@ -12,7 +12,7 @@ use dfc_core::{
 };
 use dfc_data_fabric::{DataFabricClient, EventIngestService, IngestOutcome, MockDataFabricClient};
 use dfc_hitl::{
-    HitlReviewBundle, ReviewBundleAssembler, ReviewDecisionRequest, ReviewDecisionResponse,
+    ReviewBundleAssembler, ReviewDecisionRequest, ReviewDecisionResponse,
 };
 use dfc_replay::{AuditContext, ReplayBridge};
 use serde::{Deserialize, Serialize};
@@ -454,6 +454,7 @@ mod tests {
     use super::*;
     use axum::body::Body;
     use axum::http::Request;
+    use dfc_hitl::HitlReviewBundle;
     use tower::ServiceExt;
 
     fn app() -> Router {
