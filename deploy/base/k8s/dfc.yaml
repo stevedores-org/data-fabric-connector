@@ -2,18 +2,27 @@ apiVersion: v1
 kind: Namespace
 metadata:
   name: dfc
+  labels:
+    app.kubernetes.io/name: dfc
+    app.kubernetes.io/part-of: aivcs
 ---
 apiVersion: v1
 kind: ServiceAccount
 metadata:
   name: dfc
   namespace: dfc
+  labels:
+    app.kubernetes.io/name: dfc
+    app.kubernetes.io/part-of: aivcs
 ---
 apiVersion: v1
 kind: ConfigMap
 metadata:
   name: dfc-config
   namespace: dfc
+  labels:
+    app.kubernetes.io/name: dfc
+    app.kubernetes.io/part-of: aivcs
 data:
   DFC_HOST: "0.0.0.0"
   DFC_PORT: "8080"
@@ -27,18 +36,22 @@ metadata:
   name: dfc
   namespace: dfc
   labels:
-    app: dfc
+    app.kubernetes.io/name: dfc
+    app.kubernetes.io/part-of: aivcs
 spec:
   replicas: 1
+  revisionHistoryLimit: 5
   selector:
     matchLabels:
-      app: dfc
+      app.kubernetes.io/name: dfc
   template:
     metadata:
       labels:
-        app: dfc
+        app.kubernetes.io/name: dfc
+        app.kubernetes.io/part-of: aivcs
     spec:
       serviceAccountName: dfc
+      automountServiceAccountToken: false
       securityContext:
         runAsNonRoot: true
         seccompProfile:
@@ -55,11 +68,13 @@ spec:
             - configMapRef:
                 name: dfc-config
           env:
+            # Optional until GSM secret dfc-data-fabric-tenant-id is seeded (infra-code ExternalSecret).
             - name: DATA_FABRIC_TENANT_ID
               valueFrom:
                 secretKeyRef:
                   name: dfc-secrets
                   key: tenant-id
+                  optional: true
           readinessProbe:
             httpGet:
               path: /readyz
@@ -75,6 +90,8 @@ spec:
           securityContext:
             allowPrivilegeEscalation: false
             readOnlyRootFilesystem: true
+            runAsUser: 65532
+            runAsGroup: 65532
             capabilities:
               drop: ["ALL"]
           resources:
@@ -91,11 +108,15 @@ metadata:
   name: dfc
   namespace: dfc
   labels:
-    app: dfc
+    app.kubernetes.io/name: dfc
+    app.kubernetes.io/part-of: aivcs
+  annotations:
+    cloud.google.com/neg: '{"exposed_ports":{"8080":{}}}'
 spec:
+  type: ClusterIP
   selector:
-    app: dfc
+    app.kubernetes.io/name: dfc
   ports:
     - name: http
-      port: 80
+      port: 8080
       targetPort: http

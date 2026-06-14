@@ -1,0 +1,24 @@
+# GKE Gateway reference — deployed on prod via infra-code overlay only.
+# Flux path: crossplane/gcp/hub/spoke/apps/dfc/overlays/gke/prod/healthcheckpolicy.yaml
+#
+# GCLB default health checks probe / on the NEG; dfc serves /healthz on 8080.
+apiVersion: networking.gke.io/v1
+kind: HealthCheckPolicy
+metadata:
+  name: dfc
+  namespace: dfc
+  labels:
+    app.kubernetes.io/name: dfc
+    app.kubernetes.io/part-of: aivcs
+    lornu.ai/managed-by: flux
+spec:
+  default:
+    config:
+      type: HTTP
+      httpHealthCheck:
+        port: 8080
+        requestPath: /healthz
+  targetRef:
+    group: ""
+    kind: Service
+    name: dfc
