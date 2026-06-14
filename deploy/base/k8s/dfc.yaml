@@ -45,7 +45,8 @@ spec:
           type: RuntimeDefault
       containers:
         - name: dfc
-          image: ghcr.io/stevedores-org/data-fabric-connector:latest
+          # Prod image (infra-code overlay): us-central1-docker.pkg.dev/gcp-lornu-ai/lornu/dfc:0.1.0
+          image: us-central1-docker.pkg.dev/gcp-lornu-ai/lornu/dfc:0.1.0
           imagePullPolicy: IfNotPresent
           ports:
             - name: http

@@ -40,7 +40,7 @@ curl localhost:8080/v1/version
 
 **Production FQDN:** `https://dfc.aivcs.io`
 
-DNS (Cloudflare) and GitOps (Crossplane → Flux on `lornu-gke-prod`) live in **lornu.ai**. Gateway: `shared-tls-gateway` / `https-aivcs-io-wildcard`. See [`deploy/README.md`](deploy/README.md).
+DNS and GitOps live in **[lornu-ai/infra-code](https://github.com/lornu-ai/infra-code)** (Flux Kustomization `apps-dfc-gke-prod` on `lornu-gke-prod`). See [`deploy/README.md`](deploy/README.md) for reconcile commands and go-live steps.
 
 ```bash
 curl -sS https://dfc.aivcs.io/healthz
@@ -54,7 +54,8 @@ E1 uses in-memory mock upstreams. Set `DATA_FABRIC_TENANT_ID` when wiring real c
 ```bash
 # Linux builder (CI / remote builder)
 nix build .#dfc-image
-skopeo copy docker-archive:result docker://ghcr.io/stevedores-org/data-fabric-connector:latest
+# Publish via dockworker → GAR (prod tag set in infra-code overlay)
+# us-central1-docker.pkg.dev/gcp-lornu-ai/lornu/dfc:0.1.0
 ```
 
 On macOS, build the image via a Linux remote builder or CI — same pattern as `mom`.

@@ -1,6 +1,7 @@
-# Canonical HTTPRoute for dfc.aivcs.io.
-# Production reconcile: lornu-ai/lornu.ai (Crossplane + Flux on lornu-gke-prod).
-# Keep in sync with the Flux-deployed copy when changing hostnames or backend ports.
+# Canonical HTTPRoute for dfc.aivcs.io (app reference).
+# Flux-deployed copy: lornu-ai/infra-code
+#   crossplane/gcp/hub/spoke/apps/dfc/overlays/gke/prod
+# Kustomization: apps-dfc-gke-prod
 apiVersion: gateway.networking.k8s.io/v1
 kind: HTTPRoute
 metadata:

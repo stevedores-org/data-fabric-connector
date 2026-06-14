@@ -11,7 +11,7 @@ DFC is a **stateless** Rust service. It normalizes events and correlates IDs bet
 - All event POSTs require `idempotency_key` and `X-Tenant-Id`
 - Mock upstream clients (`MockAivcsClient`, `MockDataFabricClient`) are the E1 default; replace in E6
 - Public FQDN: `dfc.aivcs.io` (`DFC_PUBLIC_FQDN` env, default in code)
-- Production deploy: Crossplane + Flux in `lornu-ai/lornu.ai` (DNS + HTTPRoute); `deploy/base/k8s/` here is the app reference
+- Production deploy: GitOps SoT is [lornu-ai/infra-code](https://github.com/lornu-ai/infra-code) — Flux `apps-dfc-gke-prod`; `deploy/base/k8s/` here is the app reference
 
 ## Worktrees
 
@@ -47,3 +47,4 @@ nix flake check
 - `stevedores-org/data-fabric` — canonical runs/tasks/events
 - `stevedores-org/aivcs-api` — snapshots, replay, rollback
 - `stevedores-org/aivcs-human-in-the-loop` — review UI
+- `lornu-ai/infra-code` — production GitOps (`apps-dfc-gke-prod`, DNS, Crossplane overlays)
