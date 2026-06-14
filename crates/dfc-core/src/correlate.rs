@@ -114,6 +114,16 @@ pub struct CorrelationRecord {
     #[serde(default)]
     pub repo: Option<String>,
     #[serde(default)]
+    pub kind: Option<CorrelationKind>,
+    #[serde(default)]
+    pub source_system: Option<String>,
+    #[serde(default)]
+    pub source_id: Option<String>,
+    #[serde(default)]
+    pub target_system: Option<String>,
+    #[serde(default)]
+    pub target_id: Option<String>,
+    #[serde(default)]
     pub data_fabric_run_id: Option<String>,
     #[serde(default)]
     pub data_fabric_task_id: Option<String>,
@@ -131,6 +141,11 @@ impl From<CorrelateRequest> for CorrelationRecord {
             correlation_id: req.correlation_id(),
             tenant_id: req.tenant_id,
             repo: req.repo,
+            kind: req.kind,
+            source_system: req.source_system,
+            source_id: req.source_id,
+            target_system: req.target_system,
+            target_id: req.target_id,
             data_fabric_run_id: req.data_fabric_run_id,
             data_fabric_task_id: req.data_fabric_task_id,
             aivcs_snapshot_id: req.aivcs_snapshot_id,

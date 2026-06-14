@@ -481,6 +481,7 @@ mod tests {
             .route("/healthz", get(healthz))
             .route("/v1/version", get(version))
             .route("/v1/correlate", post(correlate_create))
+            .route("/v1/correlate/{kind}/{id}", get(correlate_get))
             .route("/v1/events/aivcs", post(events_aivcs))
             .route("/v1/events/hitl", post(events_hitl))
             .with_state(state)
@@ -627,5 +628,112 @@ mod tests {
             body.event.source_system,
             dfc_core::SourceSystem::AivcsHumanInTheLoop
         );
+    }
+
+    async fn get_request(app: &Router, path: &str, tenant: &str) -> axum::response::Response {
+        app.clone()
+            .oneshot(
+                Request::get(path)
+                    .header("x-tenant-id", tenant)
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap()
+    }
+
+    #[tokio::test]
+    async fn test_correlate_lifecycle_us_c1_c2_c3() {
+        let app = app();
+
+        let body = serde_json::json!({
+            "tenant_id": "tenant-a",
+            "kind": "branch",
+            "source_system": "github",
+            "source_id": "feature-abc",
+            "target_system": "aivcs",
+            "target_id": "branch-abc",
+            "metadata": { "content_hash": "hash123" }
+        });
+
+        // 1. Create correlation mapping (US-C1)
+        let resp = post_json(&app, "/v1/correlate", "tenant-a", body.clone()).await;
+        assert_eq!(resp.status(), StatusCode::OK);
+
+        let record: CorrelationRecord = serde_json::from_slice(
+            &axum::body::to_bytes(resp.into_body(), usize::MAX)
+                .await
+                .unwrap(),
+        )
+        .unwrap();
+
+        // Stable content-addressed derivation (US-C3)
+        let expected_id = dfc_core::CorrelationId::from_content_hash("tenant-a", "hash123");
+        assert_eq!(record.correlation_id, expected_id);
+        assert_eq!(record.tenant_id, "tenant-a");
+        assert_eq!(record.kind, Some(CorrelationKind::Branch));
+        assert_eq!(record.source_id, Some("feature-abc".to_string()));
+        assert_eq!(record.target_id, Some("branch-abc".to_string()));
+
+        // Deduplication/retries are stable
+        let resp2 = post_json(&app, "/v1/correlate", "tenant-a", body).await;
+        assert_eq!(resp2.status(), StatusCode::OK);
+        let record2: CorrelationRecord = serde_json::from_slice(
+            &axum::body::to_bytes(resp2.into_body(), usize::MAX)
+                .await
+                .unwrap(),
+        )
+        .unwrap();
+        assert_eq!(record2.correlation_id, expected_id);
+
+        // 2. Resolve correlation (US-C2)
+        // Resolve using source_id
+        let resp_resolve1 = get_request(&app, "/v1/correlate/branch/feature-abc", "tenant-a").await;
+        assert_eq!(resp_resolve1.status(), StatusCode::OK);
+        let record_res1: CorrelationRecord = serde_json::from_slice(
+            &axum::body::to_bytes(resp_resolve1.into_body(), usize::MAX)
+                .await
+                .unwrap(),
+        )
+        .unwrap();
+        assert_eq!(record_res1.correlation_id, expected_id);
+
+        // Resolve using target_id
+        let resp_resolve2 = get_request(&app, "/v1/correlate/branch/branch-abc", "tenant-a").await;
+        assert_eq!(resp_resolve2.status(), StatusCode::OK);
+
+        // Resolve under a different tenant -> 404 Not Found (US-C2 / no leakage)
+        let resp_resolve3 = get_request(&app, "/v1/correlate/branch/feature-abc", "tenant-b").await;
+        assert_eq!(resp_resolve3.status(), StatusCode::NOT_FOUND);
+    }
+
+    #[tokio::test]
+    async fn test_correlate_409_conflict() {
+        let app = app();
+
+        let body1 = serde_json::json!({
+            "tenant_id": "tenant-a",
+            "kind": "pr",
+            "source_system": "github",
+            "source_id": "pr-100",
+            "target_system": "aivcs",
+            "target_id": "pr-200"
+        });
+
+        let resp1 = post_json(&app, "/v1/correlate", "tenant-a", body1).await;
+        assert_eq!(resp1.status(), StatusCode::OK);
+
+        // Try to map same PR ID to a different tenant
+        let body2 = serde_json::json!({
+            "tenant_id": "tenant-b",
+            "kind": "pr",
+            "source_system": "github",
+            "source_id": "pr-100",
+            "target_system": "aivcs",
+            "target_id": "pr-300"
+        });
+
+        let resp2 = post_json(&app, "/v1/correlate", "tenant-b", body2).await;
+        assert_eq!(resp2.status(), StatusCode::CONFLICT);
     }
 }

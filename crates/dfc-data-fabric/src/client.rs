@@ -176,13 +176,23 @@ impl DataFabricClient for MockDataFabricClient {
 
     async fn store_correlation(&self, record: &CorrelationRecord) -> Result<(), DfcError> {
         let mut correlations = self.correlations.write().await;
-        for (kind, id) in correlation_lookup_keys(record) {
-            let key = (record.tenant_id.clone(), kind, id);
-            if let Some(existing) = correlations.get(&key) {
-                if existing.tenant_id != record.tenant_id {
-                    return Err(DfcError::Conflict("tenant mismatch".into()));
+        let keys = correlation_lookup_keys(record);
+
+        for (kind, id) in &keys {
+            for ((existing_tenant, existing_kind, existing_id), _) in correlations.iter() {
+                if existing_kind == kind
+                    && existing_id == id
+                    && existing_tenant != &record.tenant_id
+                {
+                    return Err(DfcError::Conflict(format!(
+                        "tenant mismatch: ID {id} of kind {kind} is already mapped to tenant {existing_tenant}"
+                    )));
                 }
             }
+        }
+
+        for (kind, id) in keys {
+            let key = (record.tenant_id.clone(), kind, id);
             correlations.insert(key, record.clone());
         }
         Ok(())
@@ -204,17 +214,72 @@ impl DataFabricClient for MockDataFabricClient {
 
 fn correlation_lookup_keys(record: &CorrelationRecord) -> Vec<(String, String)> {
     let mut keys = Vec::new();
+
+    // 1. Index kind and source_id / target_id if present
+    if let Some(kind) = &record.kind {
+        let kind_str = kind.as_str().to_string();
+        if let Some(source_id) = &record.source_id {
+            if !source_id.trim().is_empty() {
+                keys.push((kind_str.clone(), source_id.clone()));
+            }
+        }
+        if let Some(target_id) = &record.target_id {
+            if !target_id.trim().is_empty() {
+                keys.push((kind_str, target_id.clone()));
+            }
+        }
+    }
+
+    // 2. Index flat mapping fields
     if let Some(run_id) = &record.data_fabric_run_id {
-        keys.push(("run".into(), run_id.clone()));
+        if !run_id.trim().is_empty() {
+            keys.push(("run".into(), run_id.clone()));
+        }
     }
     if let Some(task_id) = &record.data_fabric_task_id {
-        keys.push(("task".into(), task_id.clone()));
+        if !task_id.trim().is_empty() {
+            keys.push(("task".into(), task_id.clone()));
+        }
     }
     if let Some(snapshot_id) = &record.aivcs_snapshot_id {
-        keys.push(("snapshot".into(), snapshot_id.clone()));
+        if !snapshot_id.trim().is_empty() {
+            keys.push(("snapshot".into(), snapshot_id.clone()));
+        }
     }
+    if let Some(branch) = &record.aivcs_branch {
+        if !branch.trim().is_empty() {
+            keys.push(("branch".into(), branch.clone()));
+        }
+    }
+
+    // 3. Index links metadata fields
     if let Some(review_id) = record.links.get("review_id").and_then(|v| v.as_str()) {
-        keys.push(("review".into(), review_id.to_string()));
+        if !review_id.trim().is_empty() {
+            keys.push(("review".into(), review_id.to_string()));
+        }
     }
+    if let Some(session_id) = record
+        .links
+        .get("session_id")
+        .or_else(|| record.links.get("session"))
+        .and_then(|v| v.as_str())
+    {
+        if !session_id.trim().is_empty() {
+            keys.push(("session".into(), session_id.to_string()));
+        }
+    }
+    if let Some(pr_id) = record
+        .links
+        .get("pr_id")
+        .or_else(|| record.links.get("pr"))
+        .and_then(|v| v.as_str())
+    {
+        if !pr_id.trim().is_empty() {
+            keys.push(("pr".into(), pr_id.to_string()));
+        }
+    }
+
+    keys.sort();
+    keys.dedup();
     keys
 }

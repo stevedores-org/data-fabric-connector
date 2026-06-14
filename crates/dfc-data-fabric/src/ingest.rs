@@ -288,6 +288,16 @@ impl<C: DataFabricClient + ?Sized> EventIngestService<C> {
             ),
             tenant_id: event.tenant_id.clone(),
             repo: event.repo.clone(),
+            kind: Some(dfc_core::CorrelationKind::Snapshot),
+            source_system: Some("aivcs-api".to_string()),
+            source_id: Some(snapshot_id.clone()),
+            target_system: Some("data-fabric".to_string()),
+            target_id: Some(
+                event
+                    .run_id
+                    .clone()
+                    .unwrap_or_else(|| "pending".to_string()),
+            ),
             data_fabric_run_id: event.run_id.clone(),
             data_fabric_task_id: event.task_id.clone(),
             aivcs_snapshot_id: Some(snapshot_id),

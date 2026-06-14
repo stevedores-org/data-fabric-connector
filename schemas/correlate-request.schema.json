@@ -1,0 +1,54 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://github.com/stevedores-org/data-fabric-connector/schemas/correlate-request.schema.json",
+  "title": "CorrelateRequest",
+  "type": "object",
+  "required": ["tenant_id"],
+  "properties": {
+    "tenant_id": {
+      "type": "string"
+    },
+    "repo": {
+      "type": "string"
+    },
+    "kind": {
+      "type": "string",
+      "enum": ["run", "task", "branch", "pr", "review", "snapshot", "session"]
+    },
+    "source_system": {
+      "type": "string"
+    },
+    "source_id": {
+      "type": "string"
+    },
+    "target_system": {
+      "type": "string"
+    },
+    "target_id": {
+      "type": "string"
+    },
+    "data_fabric_run_id": {
+      "type": "string"
+    },
+    "data_fabric_task_id": {
+      "type": "string"
+    },
+    "aivcs_snapshot_id": {
+      "type": "string"
+    },
+    "aivcs_branch": {
+      "type": "string"
+    },
+    "metadata": {
+      "type": "object",
+      "properties": {
+        "content_hash": {
+          "type": "string",
+          "description": "Optional content hash for stable content-addressed correlation ID derivation across retries."
+        }
+      },
+      "additionalProperties": true
+    }
+  },
+  "additionalProperties": true
+}
