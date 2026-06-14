@@ -40,8 +40,12 @@ kubectl -n dfc get httproute,deployment,pods
 
 ## Go-live order
 
-1. **Publish OCI image** — `nix build .#dfc-image` → dockworker → GAR `lornu/dfc`
-2. **Bump tag + scale** — update `newTag` and set replicas to `1` in infra-code overlay (`crossplane/gcp/hub/spoke/apps/dfc/overlays/gke/prod`)
+1. **Publish OCI image** — merge `dockworker.toml` + `oci-build` workflow; ensure repo secrets `GCP_WIF_PROVIDER` and `GCP_WIF_SERVICE_ACCOUNT` match `stevedores-org/aivcs-human-in-the-loop`, then:
+   ```bash
+   gh workflow run oci-build --repo stevedores-org/data-fabric-connector
+   ```
+   Or push to `main` (tags include `0.1.0` per `Cargo.toml` / overlay).
+2. **Bump tag + scale** — set replicas to `1` in infra-code overlay (`crossplane/gcp/hub/spoke/apps/dfc/overlays/gke/prod`)
 3. **Wait for Ready** — `apps-dfc-gke-prod` + `platform-gke-gateway`
 4. **Smoke:**
 

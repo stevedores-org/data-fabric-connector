@@ -1,0 +1,134 @@
+# OCI build & publish — Nix `dfc-image` → GAR via dockworker/skopeo.
+#
+# Required repo secrets (same as stevedores-org/aivcs-human-in-the-loop):
+#   GCP_WIF_PROVIDER
+#   GCP_WIF_SERVICE_ACCOUNT
+
+name: oci-build
+
+on:
+  push:
+    branches: [main]
+    tags: ["v*"]
+  workflow_dispatch:
+
+concurrency:
+  group: oci-build-${{ github.ref }}
+  cancel-in-progress: false
+
+permissions:
+  contents: read
+  id-token: write
+
+jobs:
+  build:
+    name: dockworker OCI build & push
+    runs-on: ubuntu-24.04
+    steps:
+      - name: Checkout
+        uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v5.0.0
+
+      - name: Validate dockworker.toml
+        run: |
+          set -euo pipefail
+          python3 <<'PY'
+          import tomllib
+
+          with open("dockworker.toml", "rb") as f:
+              cfg = tomllib.load(f)
+
+          assert cfg["oci"]["spec"] == "1.0"
+          assert cfg["oci"]["builder"] == "nix"
+          assert cfg["build"]["engine"] == "nix"
+          assert cfg["oci"]["nix_output"] == "dfc-image"
+          assert cfg["registry"]["url"]
+          assert cfg["registry"]["name"] == "dfc"
+          print("dockworker.toml OK")
+          PY
+
+      - name: Load dockworker manifest
+        id: manifest
+        run: |
+          set -euo pipefail
+          python3 <<'PY' >> "$GITHUB_OUTPUT"
+          import tomllib
+
+          with open("dockworker.toml", "rb") as f:
+              cfg = tomllib.load(f)
+
+          registry_url = cfg["registry"]["url"].rstrip("/")
+          image_name = cfg["registry"]["name"]
+          version = cfg["package"]["version"]
+
+          host, _, path = registry_url.partition("/")
+          region, _, _ = host.partition("-docker.pkg.dev")
+          project, repo = path.split("/", 1)
+
+          print(f"gcp_region={region}")
+          print(f"gcp_project={project}")
+          print(f"gar_repo={repo}")
+          print(f"image_name={image_name}")
+          print(f"gar_image={registry_url}/{image_name}")
+          print(f"package_version={version}")
+          PY
+
+      - name: Install Nix
+        uses: cachix/install-nix-action@ba0dd844c9180cbf77aa72a116d6fbc515d0e87b # v27
+        with:
+          nix_path: nixpkgs=channel:nixos-unstable
+
+      - name: Authenticate to Google Cloud
+        id: auth
+        uses: google-github-actions/auth@c200f3691d83b41bf9bbd8638997a462592937ed # v2
+        with:
+          workload_identity_provider: ${{ secrets.GCP_WIF_PROVIDER }}
+          service_account: ${{ secrets.GCP_WIF_SERVICE_ACCOUNT }}
+          token_format: access_token
+          access_token_lifetime: 1800s
+
+      - name: Configure skopeo policy
+        run: |
+          mkdir -p ~/.config/containers
+          echo '{"default":[{"type":"insecureAcceptAnything"}]}' > ~/.config/containers/policy.json
+
+      - name: Build OCI image (nix)
+        env:
+          GIT_SHA: ${{ github.sha }}
+        run: |
+          set -euo pipefail
+          nix build ".#dfc-image" -L --system x86_64-linux
+          ls -lh result
+
+      - name: Compute image tags
+        id: meta
+        run: |
+          set -euo pipefail
+          SHORT_SHA="${GITHUB_SHA:0:7}"
+          TAGS=("sha-${SHORT_SHA}" "${{ steps.manifest.outputs.package_version }}")
+          if [ "${GITHUB_REF}" = "refs/heads/main" ]; then
+            TAGS+=("main" "latest")
+          fi
+          if [[ "${GITHUB_REF}" == refs/tags/v* ]]; then
+            TAGS+=("latest")
+            TAGS+=("${GITHUB_REF_NAME#v}")
+          fi
+          printf '%s\n' "${TAGS[@]}" | sort -u > tags.txt
+          echo "tags<<EOF" >> "$GITHUB_OUTPUT"
+          cat tags.txt >> "$GITHUB_OUTPUT"
+          echo "EOF" >> "$GITHUB_OUTPUT"
+
+      - name: Push to GAR
+        env:
+          ACCESS_TOKEN: ${{ steps.auth.outputs.access_token }}
+          GAR_IMAGE: ${{ steps.manifest.outputs.gar_image }}
+        run: |
+          set -euo pipefail
+          while IFS= read -r tag; do
+            [ -n "$tag" ] || continue
+            echo "Pushing ${GAR_IMAGE}:${tag}"
+            nix shell nixpkgs#skopeo -c skopeo copy \
+              --dest-creds="oauth2accesstoken:${ACCESS_TOKEN}" \
+              "docker-archive:result" \
+              "docker://${GAR_IMAGE}:${tag}"
+          done < tags.txt
+          echo "Pushed ${GAR_IMAGE} ($(tr '\n' ' ' < tags.txt))"
