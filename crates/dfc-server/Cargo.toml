@@ -1,0 +1,31 @@
+[package]
+name = "dfc-server"
+version.workspace = true
+edition.workspace = true
+authors.workspace = true
+license.workspace = true
+repository.workspace = true
+description = "Stateless HTTP server for the data-fabric connector"
+
+[[bin]]
+name = "dfc-server"
+path = "src/main.rs"
+
+[dependencies]
+anyhow = { workspace = true }
+axum = { workspace = true }
+chrono = { workspace = true }
+dfc-aivcs = { path = "../dfc-aivcs" }
+dfc-core = { path = "../dfc-core" }
+dfc-data-fabric = { path = "../dfc-data-fabric" }
+dfc-hitl = { path = "../dfc-hitl" }
+serde = { workspace = true }
+serde_json = { workspace = true }
+tokio = { workspace = true }
+tower-http = { workspace = true }
+tracing = { workspace = true }
+tracing-subscriber = { workspace = true }
+
+[dev-dependencies]
+reqwest = { workspace = true }
+tower = { version = "0.5", features = ["util"] }

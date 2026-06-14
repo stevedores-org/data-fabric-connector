@@ -1,0 +1,101 @@
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: dfc
+---
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: dfc
+  namespace: dfc
+---
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: dfc-config
+  namespace: dfc
+data:
+  DFC_HOST: "0.0.0.0"
+  DFC_PORT: "8080"
+  DFC_PUBLIC_FQDN: "dfc.aivcs.io"
+  AIVCS_API_URL: "http://aivcs-api.aivcs.svc.cluster.local"
+  DATA_FABRIC_URL: "http://data-fabric.data-fabric.svc.cluster.local"
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: dfc
+  namespace: dfc
+  labels:
+    app: dfc
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: dfc
+  template:
+    metadata:
+      labels:
+        app: dfc
+    spec:
+      serviceAccountName: dfc
+      securityContext:
+        runAsNonRoot: true
+        seccompProfile:
+          type: RuntimeDefault
+      containers:
+        - name: dfc
+          # Prod image (infra-code overlay): us-central1-docker.pkg.dev/gcp-lornu-ai/lornu/dfc:0.1.0
+          image: us-central1-docker.pkg.dev/gcp-lornu-ai/lornu/dfc:0.1.0
+          imagePullPolicy: IfNotPresent
+          ports:
+            - name: http
+              containerPort: 8080
+          envFrom:
+            - configMapRef:
+                name: dfc-config
+          env:
+            - name: DATA_FABRIC_TENANT_ID
+              valueFrom:
+                secretKeyRef:
+                  name: dfc-secrets
+                  key: tenant-id
+          readinessProbe:
+            httpGet:
+              path: /readyz
+              port: http
+            initialDelaySeconds: 3
+            periodSeconds: 10
+          livenessProbe:
+            httpGet:
+              path: /healthz
+              port: http
+            initialDelaySeconds: 5
+            periodSeconds: 20
+          securityContext:
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+            capabilities:
+              drop: ["ALL"]
+          resources:
+            requests:
+              cpu: 50m
+              memory: 64Mi
+            limits:
+              cpu: 500m
+              memory: 256Mi
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: dfc
+  namespace: dfc
+  labels:
+    app: dfc
+spec:
+  selector:
+    app: dfc
+  ports:
+    - name: http
+      port: 80
+      targetPort: http

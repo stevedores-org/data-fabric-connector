@@ -1,0 +1,68 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://github.com/stevedores-org/data-fabric-connector/schemas/dfc-event.schema.json",
+  "title": "DfcEvent",
+  "description": "Canonical data-fabric connector event envelope (dfc.v1)",
+  "type": "object",
+  "required": [
+    "schema_version",
+    "event_id",
+    "event_type",
+    "tenant_id",
+    "idempotency_key",
+    "source_system",
+    "created_at"
+  ],
+  "properties": {
+    "schema_version": {
+      "type": "string",
+      "const": "dfc.v1"
+    },
+    "event_id": {
+      "type": "string",
+      "pattern": "^evt_"
+    },
+    "event_type": {
+      "type": "string",
+      "minLength": 1
+    },
+    "tenant_id": {
+      "type": "string",
+      "minLength": 1
+    },
+    "repo": {
+      "type": "string"
+    },
+    "run_id": {
+      "type": "string"
+    },
+    "task_id": {
+      "type": "string"
+    },
+    "aivcs_ref": {
+      "type": "string"
+    },
+    "data_fabric_event_id": {
+      "type": "string"
+    },
+    "idempotency_key": {
+      "type": "string",
+      "minLength": 1
+    },
+    "source_system": {
+      "type": "string",
+      "enum": ["aivcs_api", "aivcs_human_in_the_loop", "data_fabric"]
+    },
+    "payload_ref": {
+      "type": "string"
+    },
+    "created_at": {
+      "type": "string",
+      "format": "date-time"
+    },
+    "metadata": {
+      "type": "object"
+    }
+  },
+  "additionalProperties": false
+}
