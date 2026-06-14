@@ -1,19 +1,18 @@
 use axum::{
     extract::{Path, State},
-    http::{HeaderMap, StatusCode},
+    http::{header, HeaderMap, StatusCode},
     response::{IntoResponse, Response},
     routing::{get, post},
     Json, Router,
 };
-use dfc_aivcs::{AivcsClient, MockAivcsClient};
+use dfc_aivcs::{AivcsClient, MockAivcsClient, ReviewDecisionPayload};
 use dfc_core::{
     CorrelateRequest, CorrelationKind, CorrelationRecord, DfcError, InboundAivcsEvent,
     InboundHitlEvent, ReplayRequest, RollbackRequest, TenantContext, SCHEMA_VERSION,
 };
 use dfc_data_fabric::{DataFabricClient, EventIngestService, IngestOutcome, MockDataFabricClient};
 use dfc_hitl::{
-    HitlReviewBundle, ReviewBundleAssembler, ReviewDecision, ReviewDecisionRequest,
-    ReviewDecisionResponse,
+    HitlReviewBundle, ReviewBundleAssembler, ReviewDecisionRequest, ReviewDecisionResponse,
 };
 use serde::{Deserialize, Serialize};
 use std::sync::Arc;
@@ -281,15 +280,25 @@ async fn hitl_review_get(
     State(state): State<AppState>,
     headers: HeaderMap,
     Path(review_id): Path<String>,
-) -> Result<Json<HitlReviewBundle>, ApiError> {
+) -> Result<Response, ApiError> {
     let tenant = tenant_from_headers(&headers)?;
-    let assembler = ReviewBundleAssembler::new(state.data_fabric.clone());
+    let assembler = ReviewBundleAssembler::new(state.data_fabric.clone(), state.aivcs.clone());
     let bundle = assembler
         .assemble(&tenant.tenant_id, &review_id)
         .await
         .map_err(ApiError::from)?;
     tenant.ensure(&bundle.tenant_id)?;
-    Ok(Json(bundle))
+
+    let etag = bundle.etag();
+    if headers
+        .get(header::IF_NONE_MATCH)
+        .and_then(|v| v.to_str().ok())
+        .is_some_and(|v| v == etag)
+    {
+        return Ok((StatusCode::NOT_MODIFIED, [(header::ETAG, etag)], ()).into_response());
+    }
+
+    Ok((StatusCode::OK, [(header::ETAG, etag)], Json(bundle)).into_response())
 }
 
 async fn hitl_review_decision(
@@ -304,24 +313,25 @@ async fn hitl_review_decision(
         return Err(ApiError::BadRequest("idempotency_key is required".into()));
     }
 
-    let event_type = match body.decision {
-        ReviewDecision::Approved => "hitl.review.approved",
-        ReviewDecision::Rejected => "hitl.review.rejected",
-        ReviewDecision::RequestedChanges => "hitl.review.requested_changes",
-        ReviewDecision::Escalated => "hitl.review.escalated",
-    };
+    let correlation = state
+        .data_fabric
+        .get_correlation(&tenant.tenant_id, "review", &review_id)
+        .await
+        .map_err(ApiError::from)?;
 
     let mut event = dfc_core::DfcEvent::new(
-        event_type,
+        body.decision.data_fabric_event_type(),
         tenant.tenant_id.clone(),
-        body.idempotency_key,
+        body.idempotency_key.clone(),
         dfc_core::SourceSystem::AivcsHumanInTheLoop,
     );
+    event.run_id = correlation.data_fabric_run_id.clone();
+    event.task_id = correlation.data_fabric_task_id.clone();
     event.metadata = serde_json::json!({
         "review_id": review_id,
-        "reviewer": body.reviewer,
-        "reason": body.reason,
-        "constraints": body.constraints,
+        "reviewer": body.reviewer.as_deref().unwrap_or("unknown"),
+        "comment": body.comment,
+        "decision": body.decision.as_str(),
     });
 
     let stored = state
@@ -330,12 +340,32 @@ async fn hitl_review_decision(
         .await
         .map_err(ApiError::from)?;
 
+    let _ = state
+        .data_fabric
+        .bump_review_revision(&tenant.tenant_id, &review_id)
+        .await
+        .map_err(ApiError::from)?;
+
+    let aivcs_result = state
+        .aivcs
+        .submit_review_decision(&ReviewDecisionPayload {
+            tenant_id: tenant.tenant_id.clone(),
+            review_id: review_id.clone(),
+            decision: body.decision.as_str().into(),
+            comment: body.comment.clone(),
+            idempotency_key: body.idempotency_key,
+            run_id: correlation.data_fabric_run_id,
+            task_id: correlation.data_fabric_task_id,
+        })
+        .await
+        .map_err(ApiError::from)?;
+
     Ok(Json(ReviewDecisionResponse {
         review_id,
         data_fabric_event_id: stored
             .data_fabric_event_id
             .unwrap_or_else(|| stored.event_id.0.clone()),
-        aivcs_operation_id: "aivcs_op_stub".into(),
+        aivcs_operation_id: aivcs_result.operation_id,
     }))
 }
 
@@ -486,6 +516,11 @@ mod tests {
             .route("/v1/correlate/{kind}/{id}", get(correlate_get))
             .route("/v1/events/aivcs", post(events_aivcs))
             .route("/v1/events/hitl", post(events_hitl))
+            .route("/v1/hitl/reviews/{review_id}", get(hitl_review_get))
+            .route(
+                "/v1/hitl/reviews/{review_id}/decision",
+                post(hitl_review_decision),
+            )
             .with_state(state)
     }
 
@@ -747,5 +782,135 @@ mod tests {
         });
         let resp = post_json(&app, "/v1/correlate", "tenant-a", body).await;
         assert_eq!(resp.status(), StatusCode::BAD_REQUEST);
+    }
+
+    async fn correlate_review(app: &Router, review_id: &str) {
+        let correlate = serde_json::json!({
+            "tenant_id": "tenant-a",
+            "data_fabric_run_id": "run-123",
+            "data_fabric_task_id": "task-456",
+            "metadata": { "review_id": review_id }
+        });
+        let resp = post_json(app, "/v1/correlate", "tenant-a", correlate).await;
+        assert_eq!(resp.status(), StatusCode::OK);
+    }
+
+    #[tokio::test]
+    async fn hitl_review_bundle_lifecycle() {
+        let app = app();
+        correlate_review(&app, "rev-e4").await;
+
+        let resp = get_request(&app, "/v1/hitl/reviews/rev-e4", "tenant-a").await;
+        assert_eq!(resp.status(), StatusCode::OK);
+        assert_eq!(
+            resp.headers().get("etag").and_then(|v| v.to_str().ok()),
+            Some("\"rev-1\"")
+        );
+
+        let bundle: HitlReviewBundle = serde_json::from_slice(
+            &axum::body::to_bytes(resp.into_body(), usize::MAX)
+                .await
+                .unwrap(),
+        )
+        .unwrap();
+        assert_eq!(bundle.review_id, "rev-e4");
+        assert_eq!(bundle.tenant_id, "tenant-a");
+        assert!(bundle.correlation_id.is_some());
+        assert_eq!(bundle.run_id.as_deref(), Some("run-123"));
+        assert_eq!(bundle.task_id.as_deref(), Some("task-456"));
+        assert_eq!(bundle.revision, 1);
+        assert!(bundle.diff_ref.is_some());
+        assert!(bundle.validation_result.is_some());
+    }
+
+    #[tokio::test]
+    async fn hitl_review_404_unknown_or_cross_tenant() {
+        let app = app();
+        correlate_review(&app, "rev-secret").await;
+
+        let unknown = get_request(&app, "/v1/hitl/reviews/missing", "tenant-a").await;
+        assert_eq!(unknown.status(), StatusCode::NOT_FOUND);
+
+        let cross_tenant = get_request(&app, "/v1/hitl/reviews/rev-secret", "tenant-b").await;
+        assert_eq!(cross_tenant.status(), StatusCode::NOT_FOUND);
+    }
+
+    #[tokio::test]
+    async fn hitl_review_304_when_etag_matches() {
+        let app = app();
+        correlate_review(&app, "rev-etag").await;
+
+        let first = get_request(&app, "/v1/hitl/reviews/rev-etag", "tenant-a").await;
+        assert_eq!(first.status(), StatusCode::OK);
+        let etag = first
+            .headers()
+            .get("etag")
+            .and_then(|v| v.to_str().ok())
+            .unwrap()
+            .to_string();
+
+        let cached = app
+            .clone()
+            .oneshot(
+                Request::get("/v1/hitl/reviews/rev-etag")
+                    .header("x-tenant-id", "tenant-a")
+                    .header("if-none-match", etag)
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(cached.status(), StatusCode::NOT_MODIFIED);
+        assert_eq!(
+            cached.headers().get("etag").and_then(|v| v.to_str().ok()),
+            Some("\"rev-1\"")
+        );
+    }
+
+    #[tokio::test]
+    async fn hitl_decision_fanout_writes_human_event_and_calls_aivcs() {
+        let app = app();
+        correlate_review(&app, "rev-decision").await;
+
+        let decision = serde_json::json!({
+            "decision": "approved",
+            "comment": "looks good",
+            "idempotency_key": "decision-key-1"
+        });
+        let resp = post_json(
+            &app,
+            "/v1/hitl/reviews/rev-decision/decision",
+            "tenant-a",
+            decision,
+        )
+        .await;
+        assert_eq!(resp.status(), StatusCode::OK);
+
+        let body: ReviewDecisionResponse = serde_json::from_slice(
+            &axum::body::to_bytes(resp.into_body(), usize::MAX)
+                .await
+                .unwrap(),
+        )
+        .unwrap();
+        assert_eq!(body.review_id, "rev-decision");
+        assert!(!body.data_fabric_event_id.is_empty());
+        assert!(body.aivcs_operation_id.starts_with("aivcs_op_"));
+
+        let refreshed = get_request(&app, "/v1/hitl/reviews/rev-decision", "tenant-a").await;
+        assert_eq!(refreshed.status(), StatusCode::OK);
+        let etag = refreshed
+            .headers()
+            .get("etag")
+            .and_then(|v| v.to_str().ok())
+            .unwrap()
+            .to_string();
+        let bundle: HitlReviewBundle = serde_json::from_slice(
+            &axum::body::to_bytes(refreshed.into_body(), usize::MAX)
+                .await
+                .unwrap(),
+        )
+        .unwrap();
+        assert_eq!(bundle.revision, 2);
+        assert_eq!(etag, "\"rev-2\"");
     }
 }

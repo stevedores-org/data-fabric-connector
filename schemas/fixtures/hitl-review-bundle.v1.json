@@ -1,0 +1,25 @@
+{
+  "schema_version": "dfc.v1",
+  "review_id": "rev-1",
+  "tenant_id": "tenant-a",
+  "correlation_id": "corr_abc123",
+  "run_id": "run-123",
+  "task_id": "task-456",
+  "aivcs_snapshot_ref": "aivcs:snapshot:snap_1",
+  "branch_ref": "feature-abc",
+  "diff_ref": "aivcs:diff:rev-1",
+  "validation_result": {
+    "status": "passed",
+    "checks": ["lint", "policy"]
+  },
+  "evidence_graph_ref": "data-fabric:graph:rev-1",
+  "policy_decision": {
+    "status": "pending",
+    "policy_set": "default"
+  },
+  "rollback_plan": {
+    "strategy": "snapshot_rollback",
+    "status": "ready"
+  },
+  "revision": 1
+}
