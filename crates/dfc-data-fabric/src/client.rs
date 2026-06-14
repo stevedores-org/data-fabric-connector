@@ -370,10 +370,22 @@ impl DataFabricClient for MockDataFabricClient {
         id: &str,
     ) -> Result<CorrelationRecord, DfcError> {
         let correlations = self.correlations.read().await;
-        correlations
-            .get(&(tenant_id.to_string(), kind.to_string(), id.to_string()))
-            .cloned()
-            .ok_or_else(|| DfcError::NotFound(format!("{kind}/{id}")))
+        let key = (tenant_id.to_string(), kind.to_string(), id.to_string());
+        if let Some(rec) = correlations.get(&key) {
+            return Ok(rec.clone());
+        }
+        // If the key is not present for the requested tenant, check whether the
+        // ID exists under a different tenant. If so, surface a TenantMismatch
+        // error to make cross-tenant lookups explicit (403) and allow auditing.
+        for ((existing_tenant, existing_kind, existing_id), _) in correlations.iter() {
+            if existing_kind == kind && existing_id == id {
+                return Err(DfcError::TenantMismatch {
+                    expected: tenant_id.to_string(),
+                    actual: existing_tenant.clone(),
+                });
+            }
+        }
+        Err(DfcError::NotFound(format!("{kind}/{id}")))
     }
 
     async fn review_revision(&self, tenant_id: &str, review_id: &str) -> Result<u64, DfcError> {
