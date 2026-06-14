@@ -90,6 +90,7 @@ jobs:
         run: |
           mkdir -p ~/.config/containers
           echo '{"default":[{"type":"insecureAcceptAnything"}]}' > ~/.config/containers/policy.json
+          echo 'unqualified-search-registries = ["docker.io"]' > ~/.config/containers/registries.conf
 
       - name: Build OCI image (nix)
         env:
