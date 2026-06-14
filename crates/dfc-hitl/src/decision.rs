@@ -9,14 +9,33 @@ pub enum ReviewDecision {
     Escalated,
 }
 
+impl ReviewDecision {
+    pub fn data_fabric_event_type(self) -> &'static str {
+        match self {
+            Self::Approved => "human.approved",
+            Self::RequestedChanges => "human.requested_changes",
+            Self::Rejected => "human.rejected",
+            Self::Escalated => "human.escalated",
+        }
+    }
+
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Approved => "approved",
+            Self::Rejected => "rejected",
+            Self::RequestedChanges => "requested_changes",
+            Self::Escalated => "escalated",
+        }
+    }
+}
+
 #[derive(Debug, Clone, Deserialize, Serialize)]
 pub struct ReviewDecisionRequest {
     pub decision: ReviewDecision,
-    pub reviewer: String,
+    #[serde(default, alias = "reason")]
+    pub comment: Option<String>,
     #[serde(default)]
-    pub reason: Option<String>,
-    #[serde(default)]
-    pub constraints: Vec<String>,
+    pub reviewer: Option<String>,
     pub idempotency_key: String,
 }
 

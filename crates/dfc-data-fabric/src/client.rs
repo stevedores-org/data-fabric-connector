@@ -1,11 +1,13 @@
 use async_trait::async_trait;
 use dfc_core::{CorrelationRecord, DfcError, DfcEvent};
 use reqwest::Client;
+use serde::Deserialize;
 use std::collections::HashMap;
 use std::sync::Arc;
 use tokio::sync::RwLock;
 
 use crate::config::DataFabricConfig;
+use crate::review::DataFabricReviewFragment;
 
 #[async_trait]
 pub trait DataFabricClient: Send + Sync {
@@ -22,6 +24,14 @@ pub trait DataFabricClient: Send + Sync {
         kind: &str,
         id: &str,
     ) -> Result<CorrelationRecord, DfcError>;
+    async fn review_revision(&self, tenant_id: &str, review_id: &str) -> Result<u64, DfcError>;
+    async fn bump_review_revision(&self, tenant_id: &str, review_id: &str)
+        -> Result<u64, DfcError>;
+    async fn fetch_review_fragment(
+        &self,
+        tenant_id: &str,
+        review_id: &str,
+    ) -> Result<DataFabricReviewFragment, DfcError>;
 }
 
 pub struct HttpDataFabricClient {
@@ -139,14 +149,124 @@ impl DataFabricClient for HttpDataFabricClient {
             message: e.to_string(),
         })
     }
+
+    async fn review_revision(&self, tenant_id: &str, review_id: &str) -> Result<u64, DfcError> {
+        let url = format!(
+            "{}/v1/hitl/reviews/{}/revision",
+            self.config.base_url.trim_end_matches('/'),
+            review_id
+        );
+        let resp = self
+            .http
+            .get(&url)
+            .header("X-Tenant-Id", tenant_id)
+            .send()
+            .await
+            .map_err(|e| DfcError::Upstream {
+                system: "data-fabric".into(),
+                message: e.to_string(),
+            })?;
+
+        if !resp.status().is_success() {
+            return Err(DfcError::Upstream {
+                system: "data-fabric".into(),
+                message: format!("status {}", resp.status()),
+            });
+        }
+
+        #[derive(Deserialize)]
+        struct RevisionBody {
+            revision: u64,
+        }
+        let body: RevisionBody = resp.json().await.map_err(|e| DfcError::Upstream {
+            system: "data-fabric".into(),
+            message: e.to_string(),
+        })?;
+        Ok(body.revision)
+    }
+
+    async fn bump_review_revision(
+        &self,
+        tenant_id: &str,
+        review_id: &str,
+    ) -> Result<u64, DfcError> {
+        let url = format!(
+            "{}/v1/hitl/reviews/{}/revision",
+            self.config.base_url.trim_end_matches('/'),
+            review_id
+        );
+        let resp = self
+            .http
+            .post(&url)
+            .header("X-Tenant-Id", tenant_id)
+            .send()
+            .await
+            .map_err(|e| DfcError::Upstream {
+                system: "data-fabric".into(),
+                message: e.to_string(),
+            })?;
+
+        if !resp.status().is_success() {
+            return Err(DfcError::Upstream {
+                system: "data-fabric".into(),
+                message: format!("status {}", resp.status()),
+            });
+        }
+
+        #[derive(Deserialize)]
+        struct RevisionBody {
+            revision: u64,
+        }
+        let body: RevisionBody = resp.json().await.map_err(|e| DfcError::Upstream {
+            system: "data-fabric".into(),
+            message: e.to_string(),
+        })?;
+        Ok(body.revision)
+    }
+
+    async fn fetch_review_fragment(
+        &self,
+        tenant_id: &str,
+        review_id: &str,
+    ) -> Result<DataFabricReviewFragment, DfcError> {
+        let url = format!(
+            "{}/v1/hitl/reviews/{}/fragment",
+            self.config.base_url.trim_end_matches('/'),
+            review_id
+        );
+        let resp = self
+            .http
+            .get(&url)
+            .header("X-Tenant-Id", tenant_id)
+            .send()
+            .await
+            .map_err(|e| DfcError::Upstream {
+                system: "data-fabric".into(),
+                message: e.to_string(),
+            })?;
+
+        if !resp.status().is_success() {
+            return Err(DfcError::Upstream {
+                system: "data-fabric".into(),
+                message: format!("status {}", resp.status()),
+            });
+        }
+
+        resp.json().await.map_err(|e| DfcError::Upstream {
+            system: "data-fabric".into(),
+            message: e.to_string(),
+        })
+    }
 }
 
 type CorrelationKey = (String, String, String);
+type ReviewKey = (String, String);
 
 #[derive(Debug, Default)]
 pub struct MockDataFabricClient {
     correlations: Arc<RwLock<HashMap<CorrelationKey, CorrelationRecord>>>,
     events: Arc<RwLock<HashMap<String, DfcEvent>>>,
+    review_revisions: Arc<RwLock<HashMap<ReviewKey, u64>>>,
 }
 
 #[async_trait]
@@ -209,6 +329,40 @@ impl DataFabricClient for MockDataFabricClient {
             .get(&(tenant_id.to_string(), kind.to_string(), id.to_string()))
             .cloned()
             .ok_or_else(|| DfcError::NotFound(format!("{kind}/{id}")))
+    }
+
+    async fn review_revision(&self, tenant_id: &str, review_id: &str) -> Result<u64, DfcError> {
+        let revisions = self.review_revisions.read().await;
+        Ok(revisions
+            .get(&(tenant_id.to_string(), review_id.to_string()))
+            .copied()
+            .unwrap_or(1))
+    }
+
+    async fn bump_review_revision(
+        &self,
+        tenant_id: &str,
+        review_id: &str,
+    ) -> Result<u64, DfcError> {
+        let mut revisions = self.review_revisions.write().await;
+        let key = (tenant_id.to_string(), review_id.to_string());
+        let next = revisions.get(&key).copied().unwrap_or(1) + 1;
+        revisions.insert(key, next);
+        Ok(next)
+    }
+
+    async fn fetch_review_fragment(
+        &self,
+        _tenant_id: &str,
+        review_id: &str,
+    ) -> Result<DataFabricReviewFragment, DfcError> {
+        Ok(DataFabricReviewFragment {
+            validation_result: Some(serde_json::json!({
+                "status": "passed",
+                "review_id": review_id,
+                "checks": ["lint", "policy"]
+            })),
+        })
     }
 }
 
