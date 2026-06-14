@@ -4,6 +4,7 @@ members = [
   "crates/dfc-aivcs",
   "crates/dfc-data-fabric",
   "crates/dfc-hitl",
+  "crates/dfc-replay",
   "crates/dfc-server",
 ]
 resolver = "2"

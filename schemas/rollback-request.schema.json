@@ -1,0 +1,21 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://github.com/stevedores-org/data-fabric-connector/schemas/rollback-request.schema.json",
+  "title": "RollbackRequest",
+  "type": "object",
+  "required": [
+    "tenant_id",
+    "branch_id",
+    "target_snapshot_id",
+    "reason",
+    "idempotency_key"
+  ],
+  "properties": {
+    "tenant_id": { "type": "string" },
+    "branch_id": { "type": "string" },
+    "target_snapshot_id": { "type": "string" },
+    "reason": { "type": "string", "minLength": 1 },
+    "idempotency_key": { "type": "string", "minLength": 1 }
+  },
+  "additionalProperties": false
+}

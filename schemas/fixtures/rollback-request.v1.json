@@ -1,0 +1,7 @@
+{
+  "tenant_id": "tenant-a",
+  "branch_id": "branch-abc",
+  "target_snapshot_id": "snap_rollback",
+  "reason": "policy violation detected",
+  "idempotency_key": "rollback-key-1"
+}
