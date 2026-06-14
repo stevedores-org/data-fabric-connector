@@ -2,6 +2,7 @@
   "$schema": "https://json-schema.org/draft/2020-12/schema",
   "$id": "https://github.com/stevedores-org/data-fabric-connector/schemas/correlate-request.schema.json",
   "title": "CorrelateRequest",
+  "description": "Register cross-system ID mapping (Epic E2 / issue #3). When metadata.content_hash is set, correlation_id is derived from tenant + hash for stable deduplication across retries.",
   "type": "object",
   "required": ["tenant_id"],
   "properties": {
