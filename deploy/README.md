@@ -12,7 +12,9 @@ Infra is wired in **[lornu-ai/infra-code](https://github.com/lornu-ai/infra-code
 | **Gateway** | `shared-tls-gateway` listener `https-aivcs-io-wildcard` |
 | **Depends on** | `platform-gke-gateway` (listener Ready) |
 | **OCI image** | `us-central1-docker.pkg.dev/gcp-lornu-ai/lornu/dfc:0.1.0` |
-| **Replicas (prod overlay)** | `0` until GAR has the image |
+| **Service / HTTPRoute port** | **8080** (matches container; GKE NEG health checks) |
+| **Replicas (prod overlay)** | `1` (live on `lornu-gke-prod`) |
+| **Tenant secret** | `dfc-secrets/tenant-id` ← GSM `dfc-data-fabric-tenant-id` (infra-code ExternalSecret; optional until E6) |
 
 Merged infra PRs:
 
@@ -27,7 +29,7 @@ The record will not appear publicly until `infra-crossplane-cloudflare-dns` is R
 
 ### App-owned reference (`deploy/base/k8s/`)
 
-Manifests here define the Deployment/Service/HTTPRoute **shape** for the app. The Flux-deployed copy lives under infra-code above — align ports, probes, hostnames, and env when you change these files.
+Manifests here define the Deployment/Service/HTTPRoute **shape** for the app. The Flux-deployed copy lives under infra-code above — align ports (8080), probes, hostnames, env, and NEG annotation when you change these files. GKE `HealthCheckPolicy` is reference-only here; prod applies it via infra-code overlay.
 
 ## Reconcile (ops)
 
@@ -71,6 +73,7 @@ Mock upstreams are the E1 default — no cluster DNS required.
 |------|---------|
 | `base/k8s/dfc.yaml` | Namespace, Deployment, Service, ConfigMap (reference) |
 | `base/k8s/httproute.yaml` | Gateway API route for `dfc.aivcs.io` (reference) |
+| `base/k8s/healthcheckpolicy.yaml` | GKE Gateway health check reference (applied via infra-code prod overlay) |
 
 ## Related
 
