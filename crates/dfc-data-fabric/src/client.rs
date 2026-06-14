@@ -10,6 +10,11 @@ use crate::config::DataFabricConfig;
 #[async_trait]
 pub trait DataFabricClient: Send + Sync {
     async fn ingest_event(&self, event: &DfcEvent) -> Result<DfcEvent, DfcError>;
+    async fn get_event_by_idempotency(
+        &self,
+        tenant_id: &str,
+        idempotency_key: &str,
+    ) -> Result<Option<DfcEvent>, DfcError>;
     async fn store_correlation(&self, record: &CorrelationRecord) -> Result<(), DfcError>;
     async fn get_correlation(
         &self,
@@ -60,6 +65,14 @@ impl DataFabricClient for HttpDataFabricClient {
             system: "data-fabric".into(),
             message: e.to_string(),
         })
+    }
+
+    async fn get_event_by_idempotency(
+        &self,
+        _tenant_id: &str,
+        _idempotency_key: &str,
+    ) -> Result<Option<DfcEvent>, DfcError> {
+        Ok(None)
     }
 
     async fn store_correlation(&self, record: &CorrelationRecord) -> Result<(), DfcError> {
@@ -151,6 +164,16 @@ impl DataFabricClient for MockDataFabricClient {
         Ok(stored)
     }
 
+    async fn get_event_by_idempotency(
+        &self,
+        tenant_id: &str,
+        idempotency_key: &str,
+    ) -> Result<Option<DfcEvent>, DfcError> {
+        let key = format!("{tenant_id}:{idempotency_key}");
+        let events = self.events.read().await;
+        Ok(events.get(&key).cloned())
+    }
+
     async fn store_correlation(&self, record: &CorrelationRecord) -> Result<(), DfcError> {
         let mut correlations = self.correlations.write().await;
         for (kind, id) in correlation_lookup_keys(record) {
@@ -189,6 +212,9 @@ fn correlation_lookup_keys(record: &CorrelationRecord) -> Vec<(String, String)> 
     }
     if let Some(snapshot_id) = &record.aivcs_snapshot_id {
         keys.push(("snapshot".into(), snapshot_id.clone()));
+    }
+    if let Some(review_id) = record.links.get("review_id").and_then(|v| v.as_str()) {
+        keys.push(("review".into(), review_id.to_string()));
     }
     keys
 }
