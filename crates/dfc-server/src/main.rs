@@ -776,6 +776,14 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn upstream_mode_defaults_to_mock_when_tenant_id_empty() {
+        std::env::remove_var("DFC_UPSTREAM_MODE");
+        std::env::set_var("DATA_FABRIC_TENANT_ID", "");
+        assert_eq!(UpstreamMode::from_env(), UpstreamMode::Mock);
+        std::env::remove_var("DATA_FABRIC_TENANT_ID");
+    }
+
+    #[tokio::test]
     async fn cross_tenant_lookup_forbidden_and_audited() {
         let mock = Arc::new(MockDataFabricClient::default());
         let req = dfc_core::CorrelateRequest {
