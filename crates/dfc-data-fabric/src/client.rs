@@ -552,6 +552,22 @@ fn correlation_lookup_keys(record: &CorrelationRecord) -> Vec<(String, String)> 
 mod tests {
     use super::*;
 
+    #[test]
+    fn urlencoding_neutralises_path_traversal_attempts() {
+        // H5 regression: bare upstream URLs are built with format! and a
+        // user-supplied segment. Without `urlencoding::encode` a value like
+        // "../admin" would escape the intended route on data-fabric. This
+        // test pins the behaviour at the encoding layer; if the import is
+        // ever dropped these assertions fail before any URL is built.
+        assert_eq!(urlenc("../admin"), "..%2Fadmin");
+        assert_eq!(urlenc("foo/bar"), "foo%2Fbar");
+        assert_eq!(urlenc("a?b=c"), "a%3Fb%3Dc");
+
+        // Safe inputs round-trip unchanged — no double-encoding risk.
+        assert_eq!(urlenc("review_42"), "review_42");
+        assert_eq!(urlenc("dec-key-1"), "dec-key-1");
+    }
+
     #[tokio::test]
     async fn get_correlation_returns_tenant_mismatch_if_present_elsewhere() {
         let client = MockDataFabricClient::default();

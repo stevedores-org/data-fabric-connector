@@ -1254,4 +1254,130 @@ mod tests {
             );
         }
     }
+
+    /// Test fixture: AIVCS client that always errors.
+    ///
+    /// Used to drive the unhappy path through `hitl_review_decision` so we
+    /// can assert that side effects (the review revision bump) do *not*
+    /// happen when AIVCS fails. Kept inside the test module so production
+    /// code doesn't grow a "fail on demand" knob.
+    #[derive(Default)]
+    struct FailingAivcsClient;
+
+    #[async_trait::async_trait]
+    impl AivcsClient for FailingAivcsClient {
+        async fn request_replay(
+            &self,
+            _: &dfc_core::ReplayRequest,
+        ) -> Result<dfc_core::ReplayResponse, dfc_core::DfcError> {
+            Err(dfc_core::DfcError::upstream(
+                "aivcs-api",
+                "forced failure (test)",
+                Some(500),
+            ))
+        }
+        async fn request_rollback(
+            &self,
+            _: &dfc_core::RollbackRequest,
+        ) -> Result<dfc_core::RollbackResponse, dfc_core::DfcError> {
+            Err(dfc_core::DfcError::upstream(
+                "aivcs-api",
+                "forced failure (test)",
+                Some(500),
+            ))
+        }
+        async fn fetch_review_fragments(
+            &self,
+            _: &str,
+            _: &str,
+        ) -> Result<dfc_aivcs::ReviewFragments, dfc_core::DfcError> {
+            Err(dfc_core::DfcError::upstream(
+                "aivcs-api",
+                "forced failure (test)",
+                Some(500),
+            ))
+        }
+        async fn submit_review_decision(
+            &self,
+            _: &dfc_aivcs::ReviewDecisionPayload,
+        ) -> Result<dfc_aivcs::ReviewDecisionResult, dfc_core::DfcError> {
+            Err(dfc_core::DfcError::upstream(
+                "aivcs-api",
+                "forced failure (test)",
+                Some(500),
+            ))
+        }
+    }
+
+    fn app_with_aivcs(
+        data_fabric: Arc<dyn DataFabricClient>,
+        aivcs: Arc<dyn AivcsClient>,
+    ) -> Router {
+        let idempotency_config = IdempotencyConfig {
+            backend: IdempotencyBackendKind::Memory,
+            ttl: dfc_data_fabric::MIN_IDEMPOTENCY_TTL,
+            redis_url: None,
+        };
+        let ingest = Arc::new(
+            EventIngestService::with_options(data_fabric.clone(), idempotency_config, None)
+                .expect("test idempotency store"),
+        );
+        let state = test_app_state(data_fabric, ingest, aivcs);
+        Router::new()
+            .route("/v1/correlate", post(correlate_create))
+            .route(
+                "/v1/hitl/reviews/{review_id}/decision",
+                post(hitl_review_decision),
+            )
+            .with_state(state)
+    }
+
+    #[tokio::test]
+    async fn revision_does_not_bump_when_aivcs_submit_fails() {
+        // M3 regression: previously the review revision bumped BEFORE the
+        // AIVCS submit. An AIVCS failure would leave clients refetching a
+        // bumped ETag for downstream state that never changed. Post-fix the
+        // revision must be unchanged whenever AIVCS errors.
+        let mock = Arc::new(MockDataFabricClient::default());
+        let data_fabric: Arc<dyn DataFabricClient> = mock.clone();
+        let aivcs: Arc<dyn AivcsClient> = Arc::new(FailingAivcsClient);
+        let app = app_with_aivcs(data_fabric, aivcs);
+
+        // Seed a correlation so hitl_review_decision can find it.
+        let correlate = serde_json::json!({
+            "tenant_id": "tenant-a",
+            "data_fabric_run_id": "run-m3",
+            "metadata": { "review_id": "rev-m3" }
+        });
+        let r = post_json(&app, "/v1/correlate", "tenant-a", correlate).await;
+        assert_eq!(r.status(), StatusCode::OK);
+
+        let rev_before = mock.review_revision("tenant-a", "rev-m3").await.unwrap();
+
+        let decision = serde_json::json!({
+            "decision": "approved",
+            "comment": "test",
+            "idempotency_key": "m3-key"
+        });
+        let resp = post_json(
+            &app,
+            "/v1/hitl/reviews/rev-m3/decision",
+            "tenant-a",
+            decision,
+        )
+        .await;
+        // AIVCS returned 500 → handler maps to upstream/5xx; either is fine,
+        // just must not be 2xx.
+        assert!(
+            !resp.status().is_success(),
+            "expected error status, got {}",
+            resp.status()
+        );
+
+        let rev_after = mock.review_revision("tenant-a", "rev-m3").await.unwrap();
+        assert_eq!(
+            rev_before, rev_after,
+            "review revision must not bump when AIVCS submit fails (M3)"
+        );
+    }
 }

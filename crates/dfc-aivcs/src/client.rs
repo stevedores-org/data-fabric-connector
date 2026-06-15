@@ -273,6 +273,22 @@ mod tests {
         let resp = mock.request_rollback(&rollback).await.unwrap();
         assert_eq!(resp.rollback_id, "rollback_a🚀🚀🚀b");
 
+        // C1: third site — submit_review_decision had the same byte-slice bug.
+        let payload = ReviewDecisionPayload {
+            tenant_id: "tenant-a".into(),
+            review_id: "review-1".into(),
+            decision: "approve".into(),
+            comment: None,
+            idempotency_key: req.idempotency_key.clone(),
+            run_id: None,
+            task_id: None,
+        };
+        let resp = mock
+            .submit_review_decision(&payload)
+            .await
+            .expect("must not panic");
+        assert_eq!(resp.operation_id, "aivcs_op_a🚀🚀🚀b");
+
         // Long-input truncation lands cleanly on the 8th char.
         req.idempotency_key = "🚀".repeat(20);
         let resp = mock.request_replay(&req).await.unwrap();

@@ -426,6 +426,7 @@ name = "dfc-server"
 version = "0.1.1"
 dependencies = [
  "anyhow",
+ "async-trait",
  "axum 0.8.9",
  "chrono",
  "dfc-aivcs",
