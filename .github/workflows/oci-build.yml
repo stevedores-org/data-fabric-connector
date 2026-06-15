@@ -124,10 +124,39 @@ jobs:
           GAR_IMAGE: ${{ steps.manifest.outputs.gar_image }}
         run: |
           set -euo pipefail
+          # Ensure we have a regular tar archive for skopeo (avoid long Nix store symlink names)
+          SRC=./result
+          if [ -f "./result" ]; then
+            SRC=./result
+          else
+            # create ./result.tar from the build output (directory or symlink)
+            rm -f ./result.tar || true
+            if [ -d ./result ]; then
+              tar -C ./result -cf ./result.tar .
+            else
+              # resolve symlink target if present
+              if [ -L ./result ]; then
+                target=$(readlink -f ./result 2>/dev/null || readlink ./result)
+                if [ -f "$target" ]; then
+                  cp "$target" ./result.tar
+                elif [ -d "$target" ]; then
+                  tar -C "$target" -cf ./result.tar .
+                else
+                  echo "Cannot package ./result (target $target)" >&2
+                  exit 1
+                fi
+              else
+                echo "No ./result file or directory found" >&2
+                exit 1
+              fi
+            fi
+            SRC=./result.tar
+          fi
+
           while IFS= read -r tag; do
             [ -n "$tag" ] || continue
             echo "Pushing ${GAR_IMAGE}:${tag}"
-            nix shell nixpkgs#skopeo -c "skopeo copy --dest-creds=\"oauth2accesstoken:${ACCESS_TOKEN}\" docker-archive:./result docker://${GAR_IMAGE}:${tag}" \
+            nix shell nixpkgs#skopeo -c "skopeo copy --dest-creds=\"oauth2accesstoken:${ACCESS_TOKEN}\" docker-archive:${SRC} docker://${GAR_IMAGE}:${tag}" \
               || (echo "skopeo push failed for ${tag}" && exit 1)
           done < tags.txt
           echo "Pushed ${GAR_IMAGE} ($(tr '\n' ' ' < tags.txt))"
