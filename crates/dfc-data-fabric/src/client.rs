@@ -5,6 +5,7 @@ use serde::Deserialize;
 use std::collections::HashMap;
 use std::sync::Arc;
 use tokio::sync::RwLock;
+use urlencoding::encode as urlenc;
 
 use crate::config::DataFabricConfig;
 use crate::http::{send_allowing_status, send_with_retry};
@@ -97,10 +98,12 @@ impl DataFabricClient for HttpDataFabricClient {
         tenant_id: &str,
         idempotency_key: &str,
     ) -> Result<Option<DfcEvent>, DfcError> {
+        // H5: idempotency_key is caller-controlled. Without encoding, values
+        // like "../admin" or "%2F" escape the intended upstream route.
         let url = format!(
             "{}/v1/events/by-idempotency/{}",
             self.config.base_url.trim_end_matches('/'),
-            idempotency_key
+            urlenc(idempotency_key)
         );
         let resp = send_allowing_status(
             &self.http,
@@ -156,11 +159,12 @@ impl DataFabricClient for HttpDataFabricClient {
         kind: &str,
         id: &str,
     ) -> Result<CorrelationRecord, DfcError> {
+        // H5: `kind` is internal but `id` is caller-controlled (route param).
         let url = format!(
             "{}/v1/correlations/{}/{}",
             self.config.base_url.trim_end_matches('/'),
-            kind,
-            id
+            urlenc(kind),
+            urlenc(id)
         );
         let resp = send_allowing_status(
             &self.http,
@@ -191,7 +195,7 @@ impl DataFabricClient for HttpDataFabricClient {
         let url = format!(
             "{}/v1/hitl/reviews/{}/revision",
             self.config.base_url.trim_end_matches('/'),
-            review_id
+            urlenc(review_id)
         );
         let resp = send_with_retry(
             &self.http,
@@ -221,7 +225,7 @@ impl DataFabricClient for HttpDataFabricClient {
         let url = format!(
             "{}/v1/hitl/reviews/{}/revision",
             self.config.base_url.trim_end_matches('/'),
-            review_id
+            urlenc(review_id)
         );
         let resp = send_with_retry(
             &self.http,
@@ -251,7 +255,7 @@ impl DataFabricClient for HttpDataFabricClient {
         let url = format!(
             "{}/v1/hitl/reviews/{}/fragment",
             self.config.base_url.trim_end_matches('/'),
-            review_id
+            urlenc(review_id)
         );
         let resp = send_with_retry(
             &self.http,
@@ -277,7 +281,7 @@ impl DataFabricClient for HttpDataFabricClient {
         let url = format!(
             "{}/v1/runs/{}/snapshot-lineage",
             self.config.base_url.trim_end_matches('/'),
-            run_id
+            urlenc(run_id)
         );
         let task = task_id.map(str::to_string);
         let target = target_snapshot_id.map(str::to_string);

@@ -157,9 +157,15 @@ async fn version(State(state): State<AppState>) -> Json<VersionResponse> {
 }
 
 fn tenant_from_headers(headers: &HeaderMap) -> Result<TenantContext, ApiError> {
+    // H1: PR #24 fixed the env-var auto-detect path, but the request-header path
+    // still accepted empty/whitespace `X-Tenant-Id`. That tenant value then
+    // flowed into upstream `get_correlation("", …)` calls. Mirror the
+    // `actor_from_headers` filter so missing-and-empty are treated identically.
     headers
         .get("x-tenant-id")
         .and_then(|v| v.to_str().ok())
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
         .map(|s| TenantContext::new(s.to_string()))
         .ok_or_else(|| ApiError::BadRequest("X-Tenant-Id header is required".into()))
 }
@@ -367,12 +373,9 @@ async fn hitl_review_decision(
         .await
         .map_err(ApiError::from)?;
 
-    let _ = state
-        .data_fabric
-        .bump_review_revision(&tenant.tenant_id, &review_id)
-        .await
-        .map_err(ApiError::from)?;
-
+    // M3: bump revision *after* AIVCS confirms. Previously a failed AIVCS
+    // submit would still leave a bumped ETag, so refetches reported `rev-N+1`
+    // for a state that never changed downstream.
     let aivcs_result = state
         .aivcs
         .submit_review_decision(&ReviewDecisionPayload {
@@ -384,6 +387,12 @@ async fn hitl_review_decision(
             run_id: correlation.data_fabric_run_id,
             task_id: correlation.data_fabric_task_id,
         })
+        .await
+        .map_err(ApiError::from)?;
+
+    let _ = state
+        .data_fabric
+        .bump_review_revision(&tenant.tenant_id, &review_id)
         .await
         .map_err(ApiError::from)?;
 
@@ -1219,5 +1228,30 @@ mod tests {
         )
         .await;
         assert_eq!(resp.status(), StatusCode::BAD_REQUEST);
+    }
+
+    #[tokio::test]
+    async fn tenant_header_rejects_empty_and_whitespace() {
+        // H1 regression: PR #24 fixed the env-var path; the header path still
+        // accepted empty / whitespace tenant IDs. Both forms must 400 with the
+        // same error as a missing header.
+        let app = app();
+        let body = serde_json::json!({
+            "event_type": "aivcs.snapshot.created",
+            "tenant_id": "tenant-a",
+            "idempotency_key": "evt-1",
+            "aivcs_ref": "aivcs:snapshot:s1",
+            "run_id": "run-1"
+        });
+
+        for tenant_value in ["", "   "] {
+            let resp = post_json(&app, "/v1/events/aivcs", tenant_value, body.clone()).await;
+            assert_eq!(
+                resp.status(),
+                StatusCode::BAD_REQUEST,
+                "X-Tenant-Id={:?} must 400",
+                tenant_value
+            );
+        }
     }
 }
