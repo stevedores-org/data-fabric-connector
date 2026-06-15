@@ -566,7 +566,10 @@ mod tests {
         // lookup as tenant-a should return TenantMismatch
         let res = client.get_correlation("tenant-a", "run", "run-123").await;
         match res {
-            Err(dfc_core::DfcError::TenantMismatch { expected: _, actual }) => {
+            Err(dfc_core::DfcError::TenantMismatch {
+                expected: _,
+                actual,
+            }) => {
                 assert_eq!(actual, "tenant-b");
             }
             other => panic!("unexpected result: {:?}", other),
