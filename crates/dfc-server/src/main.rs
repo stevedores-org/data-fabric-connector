@@ -7,10 +7,12 @@ use axum::{
 };
 use dfc_aivcs::{AivcsClient, MockAivcsClient, ReviewDecisionPayload};
 use dfc_core::{
-    CorrelateRequest, CorrelationKind, CorrelationRecord, DfcError, InboundAivcsEvent,
+    CorrelateRequest, CorrelationKind, CorrelationRecord, DfcError, DfcMetrics, InboundAivcsEvent,
     InboundHitlEvent, ReplayRequest, RollbackRequest, TenantContext, SCHEMA_VERSION,
 };
-use dfc_data_fabric::{DataFabricClient, EventIngestService, IngestOutcome, MockDataFabricClient};
+use dfc_data_fabric::{
+    DataFabricClient, EventIngestService, IdempotencyConfig, IngestOutcome, MockDataFabricClient,
+};
 use dfc_hitl::{ReviewBundleAssembler, ReviewDecisionRequest, ReviewDecisionResponse};
 use dfc_replay::{AuditContext, ReplayBridge};
 use serde::{Deserialize, Serialize};
@@ -19,6 +21,7 @@ use tower_http::trace::TraceLayer;
 use tracing::info;
 
 mod config;
+mod telemetry;
 
 use config::ServerConfig;
 
@@ -30,6 +33,7 @@ struct AppState {
     data_fabric: Arc<MockDataFabricClient>,
     ingest: Arc<EventIngestService<MockDataFabricClient>>,
     aivcs: Arc<MockAivcsClient>,
+    metrics: Arc<DfcMetrics>,
 }
 
 #[derive(Serialize)]
@@ -66,11 +70,7 @@ struct ErrorBody {
 
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
-    tracing_subscriber::fmt()
-        .with_env_filter(
-            tracing_subscriber::EnvFilter::from_default_env().add_directive("dfc=info".parse()?),
-        )
-        .init();
+    telemetry::init_tracing()?;
 
     let cfg = ServerConfig::from_env();
     info!(
@@ -79,8 +79,14 @@ async fn main() -> anyhow::Result<()> {
         "dfc-server starting"
     );
 
+    let metrics = Arc::new(DfcMetrics::default());
     let data_fabric = Arc::new(MockDataFabricClient::default());
-    let ingest = Arc::new(EventIngestService::new(data_fabric.clone()));
+    let idempotency_config = IdempotencyConfig::from_env();
+    let ingest = Arc::new(EventIngestService::with_options(
+        data_fabric.clone(),
+        idempotency_config,
+        Some(metrics.clone()),
+    )?);
 
     let state = AppState {
         git_sha: option_env!("GIT_SHA").unwrap_or("dev"),
@@ -89,11 +95,13 @@ async fn main() -> anyhow::Result<()> {
         data_fabric,
         ingest,
         aivcs: Arc::new(MockAivcsClient),
+        metrics: metrics.clone(),
     };
 
     let app = Router::new()
         .route("/healthz", get(healthz))
         .route("/readyz", get(readyz))
+        .route("/metrics", get(prometheus_metrics))
         .route("/v1/version", get(version))
         .route("/v1/correlate", post(correlate_create))
         .route("/v1/correlate/{kind}/{id}", get(correlate_get))
@@ -106,6 +114,9 @@ async fn main() -> anyhow::Result<()> {
         )
         .route("/v1/replay/request", post(replay_request))
         .route("/v1/rollback/request", post(rollback_request))
+        .layer(axum::middleware::from_fn(
+            telemetry::trace_context_middleware,
+        ))
         .layer(TraceLayer::new_for_http())
         .with_state(state);
 
@@ -117,6 +128,13 @@ async fn main() -> anyhow::Result<()> {
 
 async fn healthz() -> StatusCode {
     StatusCode::OK
+}
+
+async fn prometheus_metrics(State(state): State<AppState>) -> impl IntoResponse {
+    (
+        [(header::CONTENT_TYPE, "text/plain; version=0.0.4")],
+        state.metrics.render_prometheus(),
+    )
 }
 
 async fn readyz(State(state): State<AppState>) -> impl IntoResponse {
@@ -385,7 +403,8 @@ async fn replay_request(
     let tenant = tenant_from_headers(&headers)?;
     tenant.ensure(&body.tenant_id)?;
 
-    let bridge = ReplayBridge::new(state.data_fabric.clone(), state.aivcs.clone());
+    let bridge = ReplayBridge::new(state.data_fabric.clone(), state.aivcs.clone())
+        .with_metrics(state.metrics.clone());
     let response = bridge
         .handle_replay(AuditContext::new(actor_from_headers(&headers), None), body)
         .await
@@ -402,7 +421,8 @@ async fn rollback_request(
     let tenant = tenant_from_headers(&headers)?;
     tenant.ensure(&body.tenant_id)?;
 
-    let bridge = ReplayBridge::new(state.data_fabric.clone(), state.aivcs.clone());
+    let bridge = ReplayBridge::new(state.data_fabric.clone(), state.aivcs.clone())
+        .with_metrics(state.metrics.clone());
     let response = bridge
         .handle_rollback(AuditContext::new(actor_from_headers(&headers), None), body)
         .await
@@ -427,9 +447,9 @@ impl From<DfcError> for ApiError {
             DfcError::TenantMismatch { .. } => Self::Forbidden("tenant access denied".into()),
             DfcError::NotFound(msg) => Self::NotFound(msg),
             DfcError::Conflict(msg) => Self::Conflict(msg),
-            DfcError::Upstream { system, message } => {
-                Self::Upstream(format!("{system}: {message}"))
-            }
+            DfcError::Upstream {
+                system, message, ..
+            } => Self::Upstream(format!("{system}: {message}")),
         }
     }
 }
@@ -452,12 +472,21 @@ mod tests {
     use super::*;
     use axum::body::Body;
     use axum::http::Request;
+    use dfc_data_fabric::IdempotencyBackendKind;
     use dfc_hitl::HitlReviewBundle;
     use tower::ServiceExt;
 
     fn app() -> Router {
         let data_fabric = Arc::new(MockDataFabricClient::default());
-        let ingest = Arc::new(EventIngestService::new(data_fabric.clone()));
+        let idempotency_config = IdempotencyConfig {
+            backend: IdempotencyBackendKind::Memory,
+            ttl: dfc_data_fabric::MIN_IDEMPOTENCY_TTL,
+            redis_url: None,
+        };
+        let ingest = Arc::new(
+            EventIngestService::with_options(data_fabric.clone(), idempotency_config, None)
+                .expect("test idempotency store"),
+        );
         let state = AppState {
             git_sha: "test",
             public_fqdn: config::DEFAULT_PUBLIC_FQDN.into(),
@@ -465,6 +494,7 @@ mod tests {
             data_fabric,
             ingest,
             aivcs: Arc::new(MockAivcsClient),
+            metrics: Arc::new(DfcMetrics::default()),
         };
         Router::new()
             .route("/healthz", get(healthz))
@@ -726,7 +756,18 @@ mod tests {
         // store under tenant-b
         data_fabric.store_correlation(&record).await.unwrap();
 
-        let ingest = Arc::new(EventIngestService::new(data_fabric.clone()));
+        let ingest = Arc::new(
+            EventIngestService::with_options(
+                data_fabric.clone(),
+                IdempotencyConfig {
+                    backend: IdempotencyBackendKind::Memory,
+                    ttl: dfc_data_fabric::MIN_IDEMPOTENCY_TTL,
+                    redis_url: None,
+                },
+                None,
+            )
+            .expect("test idempotency store"),
+        );
         let state = AppState {
             git_sha: "test",
             public_fqdn: config::DEFAULT_PUBLIC_FQDN.into(),
@@ -734,6 +775,7 @@ mod tests {
             data_fabric: data_fabric.clone(),
             ingest,
             aivcs: Arc::new(MockAivcsClient),
+            metrics: Arc::new(DfcMetrics::default()),
         };
         let app = Router::new()
             .route("/v1/correlate/{kind}/{id}", get(correlate_get))
@@ -1037,6 +1079,102 @@ mod tests {
         .unwrap();
         assert!(rollback.rollback_id.starts_with("rollback_"));
         assert!(rollback.data_fabric_event_id.is_some());
+    }
+
+    #[tokio::test]
+    async fn chaos_duplicate_snapshot_creates_single_record() {
+        let data_fabric = Arc::new(MockDataFabricClient::default());
+        let app = {
+            let ingest = Arc::new(
+                EventIngestService::with_options(
+                    data_fabric.clone(),
+                    IdempotencyConfig {
+                        backend: IdempotencyBackendKind::Memory,
+                        ttl: dfc_data_fabric::MIN_IDEMPOTENCY_TTL,
+                        redis_url: None,
+                    },
+                    None,
+                )
+                .expect("test idempotency store"),
+            );
+            let state = AppState {
+                git_sha: "test",
+                public_fqdn: config::DEFAULT_PUBLIC_FQDN.into(),
+                public_url: format!("https://{}", config::DEFAULT_PUBLIC_FQDN),
+                data_fabric: data_fabric.clone(),
+                ingest,
+                aivcs: Arc::new(MockAivcsClient),
+                metrics: Arc::new(DfcMetrics::default()),
+            };
+            Router::new()
+                .route("/v1/events/aivcs", post(events_aivcs))
+                .with_state(state)
+        };
+
+        let body = serde_json::json!({
+            "event_type": "aivcs.snapshot.created",
+            "tenant_id": "tenant-a",
+            "idempotency_key": "chaos-snap-dup",
+            "aivcs_ref": "aivcs:snapshot:snap_chaos",
+            "run_id": "run-chaos"
+        });
+
+        let first = post_json(&app, "/v1/events/aivcs", "tenant-a", body.clone()).await;
+        let second = post_json(&app, "/v1/events/aivcs", "tenant-a", body).await;
+        assert_eq!(first.status(), StatusCode::OK);
+        assert_eq!(second.status(), StatusCode::OK);
+        assert_eq!(data_fabric.event_count().await, 1);
+    }
+
+    #[tokio::test]
+    async fn chaos_out_of_order_branch_and_snapshot_both_recorded() {
+        let data_fabric = Arc::new(MockDataFabricClient::default());
+        let app = {
+            let ingest = Arc::new(
+                EventIngestService::with_options(
+                    data_fabric.clone(),
+                    IdempotencyConfig {
+                        backend: IdempotencyBackendKind::Memory,
+                        ttl: dfc_data_fabric::MIN_IDEMPOTENCY_TTL,
+                        redis_url: None,
+                    },
+                    None,
+                )
+                .expect("test idempotency store"),
+            );
+            let state = AppState {
+                git_sha: "test",
+                public_fqdn: config::DEFAULT_PUBLIC_FQDN.into(),
+                public_url: format!("https://{}", config::DEFAULT_PUBLIC_FQDN),
+                data_fabric: data_fabric.clone(),
+                ingest,
+                aivcs: Arc::new(MockAivcsClient),
+                metrics: Arc::new(DfcMetrics::default()),
+            };
+            Router::new()
+                .route("/v1/events/aivcs", post(events_aivcs))
+                .with_state(state)
+        };
+
+        let branch = serde_json::json!({
+            "event_type": "aivcs.branch.created",
+            "tenant_id": "tenant-a",
+            "idempotency_key": "chaos-branch",
+            "metadata": { "parent_snapshot_id": "snap_chaos_parent" }
+        });
+        let staged = post_json(&app, "/v1/events/aivcs", "tenant-a", branch).await;
+        assert_eq!(staged.status(), StatusCode::ACCEPTED);
+
+        let snapshot = serde_json::json!({
+            "event_type": "aivcs.snapshot.created",
+            "tenant_id": "tenant-a",
+            "idempotency_key": "chaos-snap-parent",
+            "aivcs_ref": "aivcs:snapshot:snap_chaos_parent",
+            "run_id": "run-chaos-oo"
+        });
+        let ingested = post_json(&app, "/v1/events/aivcs", "tenant-a", snapshot).await;
+        assert_eq!(ingested.status(), StatusCode::OK);
+        assert_eq!(data_fabric.event_count().await, 2);
     }
 
     #[tokio::test]

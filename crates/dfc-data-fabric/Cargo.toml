@@ -10,6 +10,7 @@ description = "data-fabric HTTP client for DFC"
 [dependencies]
 async-trait = { workspace = true }
 dfc-core = { path = "../dfc-core" }
+redis = { version = "0.27", features = ["tokio-comp", "connection-manager"] }
 reqwest = { workspace = true }
 serde = { workspace = true }
 serde_json = { workspace = true }

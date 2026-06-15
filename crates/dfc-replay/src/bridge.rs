@@ -1,6 +1,7 @@
 use dfc_aivcs::AivcsClient;
 use dfc_core::{
-    DfcError, ReplayRequest, ReplayResponse, RollbackRequest, RollbackResponse, SourceSystem,
+    DfcError, DfcMetrics, ReplayRequest, ReplayResponse, RollbackRequest, RollbackResponse,
+    SourceSystem,
 };
 use dfc_data_fabric::DataFabricClient;
 use serde_json::json;
@@ -13,11 +14,27 @@ use crate::audit::{
 pub struct ReplayBridge<C: DataFabricClient, A: AivcsClient> {
     data_fabric: Arc<C>,
     aivcs: Arc<A>,
+    metrics: Option<Arc<DfcMetrics>>,
 }
 
 impl<C: DataFabricClient, A: AivcsClient> ReplayBridge<C, A> {
     pub fn new(data_fabric: Arc<C>, aivcs: Arc<A>) -> Self {
-        Self { data_fabric, aivcs }
+        Self {
+            data_fabric,
+            aivcs,
+            metrics: None,
+        }
+    }
+
+    pub fn with_metrics(mut self, metrics: Arc<DfcMetrics>) -> Self {
+        self.metrics = Some(metrics);
+        self
+    }
+
+    fn record_dlq(&self) {
+        if let Some(metrics) = &self.metrics {
+            metrics.inc_dlq();
+        }
     }
 
     pub async fn handle_replay(
@@ -126,6 +143,7 @@ impl<C: DataFabricClient, A: AivcsClient> ReplayBridge<C, A> {
                 failed.run_id = Some(aivcs_req.run_id);
                 failed.task_id = aivcs_req.task_id;
                 let _ = self.data_fabric.ingest_event(&failed).await;
+                self.record_dlq();
                 Err(err)
             }
         }
@@ -213,6 +231,7 @@ impl<C: DataFabricClient, A: AivcsClient> ReplayBridge<C, A> {
                     }),
                 );
                 let _ = self.data_fabric.ingest_event(&failed).await;
+                self.record_dlq();
                 Err(err)
             }
         }
