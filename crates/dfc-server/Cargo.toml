@@ -20,11 +20,15 @@ dfc-core = { path = "../dfc-core" }
 dfc-data-fabric = { path = "../dfc-data-fabric" }
 dfc-hitl = { path = "../dfc-hitl" }
 dfc-replay = { path = "../dfc-replay" }
+opentelemetry = { version = "0.27", features = ["trace"] }
+opentelemetry-otlp = { version = "0.27", features = ["grpc-tonic"] }
+opentelemetry_sdk = { version = "0.27", features = ["rt-tokio", "trace"] }
 serde = { workspace = true }
 serde_json = { workspace = true }
 tokio = { workspace = true }
 tower-http = { workspace = true }
 tracing = { workspace = true }
+tracing-opentelemetry = "0.28"
 tracing-subscriber = { workspace = true }
 
 [dev-dependencies]

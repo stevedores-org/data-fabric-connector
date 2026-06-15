@@ -1,5 +1,5 @@
 use async_trait::async_trait;
-use dfc_core::{CorrelationRecord, DfcError, DfcEvent};
+use dfc_core::{CorrelationRecord, DfcError, DfcEvent, DfcMetrics};
 use reqwest::Client;
 use serde::Deserialize;
 use std::collections::HashMap;
@@ -7,8 +7,12 @@ use std::sync::Arc;
 use tokio::sync::RwLock;
 
 use crate::config::DataFabricConfig;
+use crate::http::{send_allowing_status, send_with_retry};
 use crate::lineage::SnapshotLineage;
+use crate::retry::RetryPolicy;
 use crate::review::DataFabricReviewFragment;
+
+const UPSTREAM: &str = "data-fabric";
 
 #[async_trait]
 pub trait DataFabricClient: Send + Sync {
@@ -45,6 +49,8 @@ pub trait DataFabricClient: Send + Sync {
 pub struct HttpDataFabricClient {
     http: Client,
     config: DataFabricConfig,
+    retry_policy: RetryPolicy,
+    metrics: Option<Arc<DfcMetrics>>,
 }
 
 impl HttpDataFabricClient {
@@ -52,7 +58,14 @@ impl HttpDataFabricClient {
         Self {
             http: Client::new(),
             config,
+            retry_policy: RetryPolicy::from_env(),
+            metrics: None,
         }
+    }
+
+    pub fn with_metrics(mut self, metrics: Arc<DfcMetrics>) -> Self {
+        self.metrics = Some(metrics);
+        self
     }
 }
 
@@ -60,37 +73,59 @@ impl HttpDataFabricClient {
 impl DataFabricClient for HttpDataFabricClient {
     async fn ingest_event(&self, event: &DfcEvent) -> Result<DfcEvent, DfcError> {
         let url = format!("{}/v1/events", self.config.base_url.trim_end_matches('/'));
-        let resp = self
-            .http
-            .post(&url)
-            .header("X-Tenant-Id", &self.config.tenant_id)
-            .json(event)
-            .send()
+        let resp = send_with_retry(
+            &self.http,
+            || {
+                self.http
+                    .post(&url)
+                    .header("X-Tenant-Id", &self.config.tenant_id)
+                    .json(event)
+            },
+            UPSTREAM,
+            &self.retry_policy,
+            self.metrics.as_deref(),
+        )
+        .await?;
+
+        resp.json()
             .await
-            .map_err(|e| DfcError::Upstream {
-                system: "data-fabric".into(),
-                message: e.to_string(),
-            })?;
-
-        if !resp.status().is_success() {
-            return Err(DfcError::Upstream {
-                system: "data-fabric".into(),
-                message: format!("status {}", resp.status()),
-            });
-        }
-
-        resp.json().await.map_err(|e| DfcError::Upstream {
-            system: "data-fabric".into(),
-            message: e.to_string(),
-        })
+            .map_err(|e| DfcError::upstream(UPSTREAM, e.to_string(), None))
     }
 
     async fn get_event_by_idempotency(
         &self,
-        _tenant_id: &str,
-        _idempotency_key: &str,
+        tenant_id: &str,
+        idempotency_key: &str,
     ) -> Result<Option<DfcEvent>, DfcError> {
-        Ok(None)
+        let url = format!(
+            "{}/v1/events/by-idempotency/{}",
+            self.config.base_url.trim_end_matches('/'),
+            idempotency_key
+        );
+        let resp = send_allowing_status(
+            &self.http,
+            || self.http.get(&url).header("X-Tenant-Id", tenant_id),
+            UPSTREAM,
+            &self.retry_policy,
+            self.metrics.as_deref(),
+        )
+        .await?;
+
+        if resp.status().as_u16() == 404 {
+            return Ok(None);
+        }
+        if !resp.status().is_success() {
+            return Err(DfcError::upstream(
+                UPSTREAM,
+                format!("status {}", resp.status()),
+                Some(resp.status().as_u16()),
+            ));
+        }
+
+        resp.json()
+            .await
+            .map_err(|e| DfcError::upstream(UPSTREAM, e.to_string(), None))
+            .map(Some)
     }
 
     async fn store_correlation(&self, record: &CorrelationRecord) -> Result<(), DfcError> {
@@ -98,24 +133,20 @@ impl DataFabricClient for HttpDataFabricClient {
             "{}/v1/correlations",
             self.config.base_url.trim_end_matches('/')
         );
-        let resp = self
-            .http
-            .post(&url)
-            .header("X-Tenant-Id", &record.tenant_id)
-            .json(record)
-            .send()
-            .await
-            .map_err(|e| DfcError::Upstream {
-                system: "data-fabric".into(),
-                message: e.to_string(),
-            })?;
-
-        if !resp.status().is_success() {
-            return Err(DfcError::Upstream {
-                system: "data-fabric".into(),
-                message: format!("status {}", resp.status()),
-            });
-        }
+        let resp = send_with_retry(
+            &self.http,
+            || {
+                self.http
+                    .post(&url)
+                    .header("X-Tenant-Id", &record.tenant_id)
+                    .json(record)
+            },
+            UPSTREAM,
+            &self.retry_policy,
+            self.metrics.as_deref(),
+        )
+        .await?;
+        let _ = resp;
         Ok(())
     }
 
@@ -131,31 +162,29 @@ impl DataFabricClient for HttpDataFabricClient {
             kind,
             id
         );
-        let resp = self
-            .http
-            .get(&url)
-            .header("X-Tenant-Id", tenant_id)
-            .send()
-            .await
-            .map_err(|e| DfcError::Upstream {
-                system: "data-fabric".into(),
-                message: e.to_string(),
-            })?;
+        let resp = send_allowing_status(
+            &self.http,
+            || self.http.get(&url).header("X-Tenant-Id", tenant_id),
+            UPSTREAM,
+            &self.retry_policy,
+            self.metrics.as_deref(),
+        )
+        .await?;
 
         if resp.status().as_u16() == 404 {
             return Err(DfcError::NotFound(format!("{kind}/{id}")));
         }
         if !resp.status().is_success() {
-            return Err(DfcError::Upstream {
-                system: "data-fabric".into(),
-                message: format!("status {}", resp.status()),
-            });
+            return Err(DfcError::upstream(
+                UPSTREAM,
+                format!("status {}", resp.status()),
+                Some(resp.status().as_u16()),
+            ));
         }
 
-        resp.json().await.map_err(|e| DfcError::Upstream {
-            system: "data-fabric".into(),
-            message: e.to_string(),
-        })
+        resp.json()
+            .await
+            .map_err(|e| DfcError::upstream(UPSTREAM, e.to_string(), None))
     }
 
     async fn review_revision(&self, tenant_id: &str, review_id: &str) -> Result<u64, DfcError> {
@@ -164,32 +193,23 @@ impl DataFabricClient for HttpDataFabricClient {
             self.config.base_url.trim_end_matches('/'),
             review_id
         );
-        let resp = self
-            .http
-            .get(&url)
-            .header("X-Tenant-Id", tenant_id)
-            .send()
-            .await
-            .map_err(|e| DfcError::Upstream {
-                system: "data-fabric".into(),
-                message: e.to_string(),
-            })?;
-
-        if !resp.status().is_success() {
-            return Err(DfcError::Upstream {
-                system: "data-fabric".into(),
-                message: format!("status {}", resp.status()),
-            });
-        }
+        let resp = send_with_retry(
+            &self.http,
+            || self.http.get(&url).header("X-Tenant-Id", tenant_id),
+            UPSTREAM,
+            &self.retry_policy,
+            self.metrics.as_deref(),
+        )
+        .await?;
 
         #[derive(Deserialize)]
         struct RevisionBody {
             revision: u64,
         }
-        let body: RevisionBody = resp.json().await.map_err(|e| DfcError::Upstream {
-            system: "data-fabric".into(),
-            message: e.to_string(),
-        })?;
+        let body: RevisionBody = resp
+            .json()
+            .await
+            .map_err(|e| DfcError::upstream(UPSTREAM, e.to_string(), None))?;
         Ok(body.revision)
     }
 
@@ -203,32 +223,23 @@ impl DataFabricClient for HttpDataFabricClient {
             self.config.base_url.trim_end_matches('/'),
             review_id
         );
-        let resp = self
-            .http
-            .post(&url)
-            .header("X-Tenant-Id", tenant_id)
-            .send()
-            .await
-            .map_err(|e| DfcError::Upstream {
-                system: "data-fabric".into(),
-                message: e.to_string(),
-            })?;
-
-        if !resp.status().is_success() {
-            return Err(DfcError::Upstream {
-                system: "data-fabric".into(),
-                message: format!("status {}", resp.status()),
-            });
-        }
+        let resp = send_with_retry(
+            &self.http,
+            || self.http.post(&url).header("X-Tenant-Id", tenant_id),
+            UPSTREAM,
+            &self.retry_policy,
+            self.metrics.as_deref(),
+        )
+        .await?;
 
         #[derive(Deserialize)]
         struct RevisionBody {
             revision: u64,
         }
-        let body: RevisionBody = resp.json().await.map_err(|e| DfcError::Upstream {
-            system: "data-fabric".into(),
-            message: e.to_string(),
-        })?;
+        let body: RevisionBody = resp
+            .json()
+            .await
+            .map_err(|e| DfcError::upstream(UPSTREAM, e.to_string(), None))?;
         Ok(body.revision)
     }
 
@@ -242,28 +253,18 @@ impl DataFabricClient for HttpDataFabricClient {
             self.config.base_url.trim_end_matches('/'),
             review_id
         );
-        let resp = self
-            .http
-            .get(&url)
-            .header("X-Tenant-Id", tenant_id)
-            .send()
+        let resp = send_with_retry(
+            &self.http,
+            || self.http.get(&url).header("X-Tenant-Id", tenant_id),
+            UPSTREAM,
+            &self.retry_policy,
+            self.metrics.as_deref(),
+        )
+        .await?;
+
+        resp.json()
             .await
-            .map_err(|e| DfcError::Upstream {
-                system: "data-fabric".into(),
-                message: e.to_string(),
-            })?;
-
-        if !resp.status().is_success() {
-            return Err(DfcError::Upstream {
-                system: "data-fabric".into(),
-                message: format!("status {}", resp.status()),
-            });
-        }
-
-        resp.json().await.map_err(|e| DfcError::Upstream {
-            system: "data-fabric".into(),
-            message: e.to_string(),
-        })
+            .map_err(|e| DfcError::upstream(UPSTREAM, e.to_string(), None))
     }
 
     async fn resolve_snapshot_lineage(
@@ -278,29 +279,29 @@ impl DataFabricClient for HttpDataFabricClient {
             self.config.base_url.trim_end_matches('/'),
             run_id
         );
-        let mut req = self.http.get(&url).header("X-Tenant-Id", tenant_id);
-        if let Some(task_id) = task_id {
-            req = req.query(&[("task_id", task_id)]);
-        }
-        if let Some(target_snapshot_id) = target_snapshot_id {
-            req = req.query(&[("target_snapshot_id", target_snapshot_id)]);
-        }
-        let resp = req.send().await.map_err(|e| DfcError::Upstream {
-            system: "data-fabric".into(),
-            message: e.to_string(),
-        })?;
+        let task = task_id.map(str::to_string);
+        let target = target_snapshot_id.map(str::to_string);
+        let resp = send_with_retry(
+            &self.http,
+            || {
+                let mut req = self.http.get(&url).header("X-Tenant-Id", tenant_id);
+                if let Some(task_id) = task.as_deref() {
+                    req = req.query(&[("task_id", task_id)]);
+                }
+                if let Some(target_snapshot_id) = target.as_deref() {
+                    req = req.query(&[("target_snapshot_id", target_snapshot_id)]);
+                }
+                req
+            },
+            UPSTREAM,
+            &self.retry_policy,
+            self.metrics.as_deref(),
+        )
+        .await?;
 
-        if !resp.status().is_success() {
-            return Err(DfcError::Upstream {
-                system: "data-fabric".into(),
-                message: format!("status {}", resp.status()),
-            });
-        }
-
-        resp.json().await.map_err(|e| DfcError::Upstream {
-            system: "data-fabric".into(),
-            message: e.to_string(),
-        })
+        resp.json()
+            .await
+            .map_err(|e| DfcError::upstream(UPSTREAM, e.to_string(), None))
     }
 }
 
@@ -312,6 +313,12 @@ pub struct MockDataFabricClient {
     correlations: Arc<RwLock<HashMap<CorrelationKey, CorrelationRecord>>>,
     events: Arc<RwLock<HashMap<String, DfcEvent>>>,
     review_revisions: Arc<RwLock<HashMap<ReviewKey, u64>>>,
+}
+
+impl MockDataFabricClient {
+    pub async fn event_count(&self) -> usize {
+        self.events.read().await.len()
+    }
 }
 
 #[async_trait]

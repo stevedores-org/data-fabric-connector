@@ -1,16 +1,16 @@
 use dfc_core::{
     aivcs_pending_correlations, aivcs_ref_snapshot_id, hitl_pending_correlations,
     snapshot_id_from_event, validate_aivcs_event_type, validate_hitl_event_type, CorrelationRecord,
-    DfcError, DfcEvent, InboundAivcsEvent, InboundHitlEvent, PendingCorrelation, SourceSystem,
+    DfcError, DfcEvent, DfcMetrics, InboundAivcsEvent, InboundHitlEvent, PendingCorrelation,
+    SourceSystem,
 };
 use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 use tokio::sync::RwLock;
 
+use crate::idempotency::{IdempotencyConfig, IdempotencyStore};
 use crate::DataFabricClient;
-
-const DEFAULT_STAGING_TTL: Duration = Duration::from_secs(3600);
 
 #[derive(Debug, Clone, PartialEq)]
 pub enum IngestOutcome {
@@ -127,19 +127,34 @@ impl StagingStore {
     }
 }
 
-pub struct EventIngestService<C: DataFabricClient + ?Sized> {
+pub struct EventIngestService<C: DataFabricClient> {
     client: Arc<C>,
+    idempotency: Arc<dyn IdempotencyStore>,
     staging: Arc<RwLock<StagingStore>>,
     staging_ttl: Duration,
+    metrics: Option<Arc<DfcMetrics>>,
 }
 
-impl<C: DataFabricClient + ?Sized> EventIngestService<C> {
+impl<C: DataFabricClient + 'static> EventIngestService<C> {
     pub fn new(client: Arc<C>) -> Self {
-        Self {
+        Self::with_options(client, IdempotencyConfig::from_env(), None)
+            .expect("idempotency store configuration")
+    }
+
+    pub fn with_options(
+        client: Arc<C>,
+        idempotency_config: IdempotencyConfig,
+        metrics: Option<Arc<DfcMetrics>>,
+    ) -> Result<Self, DfcError> {
+        let idempotency =
+            crate::idempotency::build_idempotency_store(&idempotency_config, client.clone())?;
+        Ok(Self {
             client,
+            idempotency,
             staging: Arc::new(RwLock::new(StagingStore::default())),
-            staging_ttl: DEFAULT_STAGING_TTL,
-        }
+            staging_ttl: idempotency_config.ttl,
+            metrics,
+        })
     }
 
     pub async fn ingest_aivcs(
@@ -188,6 +203,8 @@ impl<C: DataFabricClient + ?Sized> EventIngestService<C> {
 
         if event.run_id.is_some() || pending.is_empty() {
             let stored = self.client.ingest_event(&event).await?;
+            self.record_ingested(&stored.tenant_id, &stored.idempotency_key, &stored)
+                .await?;
             return Ok(IngestOutcome::Ingested(Box::new(stored)));
         }
 
@@ -195,6 +212,8 @@ impl<C: DataFabricClient + ?Sized> EventIngestService<C> {
         if unresolved.is_empty() {
             self.enrich_hitl_from_correlation(&mut event).await?;
             let stored = self.client.ingest_event(&event).await?;
+            self.record_ingested(&stored.tenant_id, &stored.idempotency_key, &stored)
+                .await?;
             return Ok(IngestOutcome::Ingested(Box::new(stored)));
         }
 
@@ -240,6 +259,8 @@ impl<C: DataFabricClient + ?Sized> EventIngestService<C> {
                 let mut event = record.event;
                 self.enrich_hitl_from_correlation(&mut event).await?;
                 let stored = self.client.ingest_event(&event).await?;
+                self.record_ingested(&stored.tenant_id, &stored.idempotency_key, &stored)
+                    .await?;
                 IngestOutcome::Ingested(Box::new(stored))
             };
 
@@ -254,7 +275,10 @@ impl<C: DataFabricClient + ?Sized> EventIngestService<C> {
         if event.event_type == "aivcs.snapshot.created" {
             self.register_snapshot_correlation(&event).await?;
         }
-        self.client.ingest_event(&event).await
+        let stored = self.client.ingest_event(&event).await?;
+        self.record_ingested(&stored.tenant_id, &stored.idempotency_key, &stored)
+            .await?;
+        Ok(stored)
     }
 
     async fn forward_aivcs(&self, event: DfcEvent) -> Result<IngestOutcome, DfcError> {
@@ -348,16 +372,25 @@ impl<C: DataFabricClient + ?Sized> EventIngestService<C> {
         tenant_id: &str,
         idempotency_key: &str,
     ) -> Result<Option<IngestOutcome>, DfcError> {
-        if let Some(event) = self
-            .client
-            .get_event_by_idempotency(tenant_id, idempotency_key)
-            .await?
-        {
+        if let Some(event) = self.idempotency.get(tenant_id, idempotency_key).await? {
             return Ok(Some(IngestOutcome::Ingested(Box::new(event))));
         }
 
         let staging = self.staging.read().await;
         Ok(staging.get(tenant_id, idempotency_key))
+    }
+
+    async fn record_ingested(
+        &self,
+        tenant_id: &str,
+        key: &str,
+        event: &DfcEvent,
+    ) -> Result<(), DfcError> {
+        self.idempotency.put(tenant_id, key, event).await?;
+        if let Some(metrics) = &self.metrics {
+            metrics.inc_events_ingested();
+        }
+        Ok(())
     }
 
     async fn unresolved(

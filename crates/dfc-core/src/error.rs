@@ -15,5 +15,33 @@ pub enum DfcError {
     Conflict(String),
 
     #[error("upstream error ({system}): {message}")]
-    Upstream { system: String, message: String },
+    Upstream {
+        system: String,
+        message: String,
+        status: Option<u16>,
+    },
+}
+
+impl DfcError {
+    pub fn upstream(
+        system: impl Into<String>,
+        message: impl Into<String>,
+        status: Option<u16>,
+    ) -> Self {
+        Self::Upstream {
+            system: system.into(),
+            message: message.into(),
+            status,
+        }
+    }
+
+    pub fn is_retryable(&self) -> bool {
+        match self {
+            Self::Upstream {
+                status: Some(status),
+                ..
+            } => *status == 429 || (500..600).contains(status),
+            _ => false,
+        }
+    }
 }
