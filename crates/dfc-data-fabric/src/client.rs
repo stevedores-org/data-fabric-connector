@@ -370,10 +370,22 @@ impl DataFabricClient for MockDataFabricClient {
         id: &str,
     ) -> Result<CorrelationRecord, DfcError> {
         let correlations = self.correlations.read().await;
-        correlations
-            .get(&(tenant_id.to_string(), kind.to_string(), id.to_string()))
-            .cloned()
-            .ok_or_else(|| DfcError::NotFound(format!("{kind}/{id}")))
+        let key = (tenant_id.to_string(), kind.to_string(), id.to_string());
+        if let Some(rec) = correlations.get(&key) {
+            return Ok(rec.clone());
+        }
+        // If the key is not present for the requested tenant, check whether the
+        // ID exists under a different tenant. If so, surface a TenantMismatch
+        // error to make cross-tenant lookups explicit (403) and allow auditing.
+        for ((existing_tenant, existing_kind, existing_id), _) in correlations.iter() {
+            if existing_kind == kind && existing_id == id {
+                return Err(DfcError::TenantMismatch {
+                    expected: tenant_id.to_string(),
+                    actual: existing_tenant.clone(),
+                });
+            }
+        }
+        Err(DfcError::NotFound(format!("{kind}/{id}")))
     }
 
     async fn review_revision(&self, tenant_id: &str, review_id: &str) -> Result<u64, DfcError> {
@@ -523,4 +535,44 @@ fn correlation_lookup_keys(record: &CorrelationRecord) -> Vec<(String, String)> 
     keys.sort();
     keys.dedup();
     keys
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[tokio::test]
+    async fn get_correlation_returns_tenant_mismatch_if_present_elsewhere() {
+        let client = MockDataFabricClient::default();
+
+        let req = dfc_core::CorrelateRequest {
+            tenant_id: "tenant-b".into(),
+            repo: None,
+            kind: None,
+            source_system: None,
+            source_id: None,
+            target_system: None,
+            target_id: None,
+            data_fabric_run_id: Some("run-123".into()),
+            data_fabric_task_id: None,
+            aivcs_snapshot_id: None,
+            aivcs_branch: None,
+            metadata: serde_json::json!({}),
+        };
+        let record = dfc_core::CorrelationRecord::from(req);
+        // store under tenant-b
+        client.store_correlation(&record).await.unwrap();
+
+        // lookup as tenant-a should return TenantMismatch
+        let res = client.get_correlation("tenant-a", "run", "run-123").await;
+        match res {
+            Err(dfc_core::DfcError::TenantMismatch {
+                expected: _,
+                actual,
+            }) => {
+                assert_eq!(actual, "tenant-b");
+            }
+            other => panic!("unexpected result: {:?}", other),
+        }
+    }
 }
