@@ -58,9 +58,9 @@
           inherit cargoArtifacts;
           pname = "dfc-server";
           cargoExtraArgs = "-p dfc-server --bin dfc-server";
-          buildEnv = {
-            GIT_SHA = gitSha;
-          };
+          preBuild = ''
+            export GIT_SHA="${gitSha}"
+          '';
         });
 
         workspaceClippy = craneLib.cargoClippy (commonArgs // {
