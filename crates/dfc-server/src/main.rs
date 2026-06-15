@@ -470,9 +470,9 @@ impl IntoResponse for ApiError {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use dfc_data_fabric::IdempotencyBackendKind;
     use axum::body::Body;
     use axum::http::Request;
+    use dfc_data_fabric::IdempotencyBackendKind;
     use dfc_hitl::HitlReviewBundle;
     use tower::ServiceExt;
 

@@ -35,7 +35,6 @@ impl RetryPolicy {
     }
 }
 
-
 pub async fn with_retry<F, Fut, T>(
     policy: &RetryPolicy,
     metrics: Option<&DfcMetrics>,
