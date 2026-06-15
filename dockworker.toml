@@ -4,7 +4,7 @@
 
 [package]
 name = "dfc"
-version = "0.1.0"
+version = "0.1.1"
 description = "Stateless anti-corruption layer between AIVCS, HITL, and data-fabric"
 runtime = "rust"
 
@@ -55,7 +55,7 @@ drop_capabilities = ["ALL"]
 [registry]
 url = "us-central1-docker.pkg.dev/gcp-lornu-ai/lornu"
 name = "dfc"
-tags = ["0.1.0", "main"]
+tags = ["0.1.1", "main"]
 
 [deploy]
 targets = ["kubernetes"]

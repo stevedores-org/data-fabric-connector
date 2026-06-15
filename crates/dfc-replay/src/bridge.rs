@@ -11,14 +11,14 @@ use crate::audit::{
     replay_response_from_event, rollback_response_from_event, terminal_event, AuditContext,
 };
 
-pub struct ReplayBridge<C: DataFabricClient, A: AivcsClient> {
-    data_fabric: Arc<C>,
-    aivcs: Arc<A>,
+pub struct ReplayBridge {
+    data_fabric: Arc<dyn DataFabricClient>,
+    aivcs: Arc<dyn AivcsClient>,
     metrics: Option<Arc<DfcMetrics>>,
 }
 
-impl<C: DataFabricClient, A: AivcsClient> ReplayBridge<C, A> {
-    pub fn new(data_fabric: Arc<C>, aivcs: Arc<A>) -> Self {
+impl ReplayBridge {
+    pub fn new(data_fabric: Arc<dyn DataFabricClient>, aivcs: Arc<dyn AivcsClient>) -> Self {
         Self {
             data_fabric,
             aivcs,
@@ -246,7 +246,7 @@ mod tests {
 
     #[tokio::test]
     async fn replay_resolves_lineage_and_returns_snapshot_chain() {
-        let data_fabric = Arc::new(MockDataFabricClient::default());
+        let data_fabric: Arc<dyn DataFabricClient> = Arc::new(MockDataFabricClient::default());
         data_fabric
             .store_correlation(&dfc_core::CorrelationRecord {
                 correlation_id: dfc_core::CorrelationId("corr_run".into()),
