@@ -37,6 +37,13 @@
         cargoToml = builtins.fromTOML (builtins.readFile ./Cargo.toml);
         pkgVersion = cargoToml.workspace.package.version;
 
+        gitSha =
+          if self ? rev then self.rev
+          else if self ? dirtyRev then self.dirtyRev
+          else
+            let envSha = builtins.getEnv "GIT_SHA";
+            in if envSha != "" then envSha else "dev";
+
         commonArgs = {
           inherit src;
           strictDeps = true;
@@ -51,6 +58,9 @@
           inherit cargoArtifacts;
           pname = "dfc-server";
           cargoExtraArgs = "-p dfc-server --bin dfc-server";
+          buildEnv = {
+            GIT_SHA = gitSha;
+          };
         });
 
         workspaceClippy = craneLib.cargoClippy (commonArgs // {
@@ -91,6 +101,7 @@
               "org.opencontainers.image.source" =
                 "https://github.com/stevedores-org/data-fabric-connector";
               "org.opencontainers.image.licenses" = "Apache-2.0";
+              "org.opencontainers.image.revision" = gitSha;
               "stevedores.org/managed-by" = "dockworker";
               "stevedores.org/fqdn" = "dfc.aivcs.io";
             };
