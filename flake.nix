@@ -66,10 +66,11 @@
         workspaceFmt = craneLib.cargoFmt { inherit src; };
 
         # OCI image — Linux-only. CI builds on a Linux runner; dockworker ships
-        # the resulting tarball to the registry.
-        image = pkgs.dockerTools.streamLayeredImage {
+        # the resulting docker-archive tarball to the registry via skopeo.
+        image = pkgs.dockerTools.buildLayeredImage {
           name = "dfc";
           tag = pkgVersion;
+          maxLayers = 50;
           contents = [
             dfc-server
             pkgs.cacert
