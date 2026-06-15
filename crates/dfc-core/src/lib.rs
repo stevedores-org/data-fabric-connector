@@ -8,6 +8,7 @@ pub mod error;
 pub mod event;
 pub mod ids;
 pub mod ingest;
+pub mod metrics;
 pub mod replay;
 pub mod tenant;
 
@@ -20,6 +21,7 @@ pub use ingest::{
     snapshot_id_from_event, snapshot_ref_from_aivcs, validate_aivcs_event_type,
     validate_hitl_event_type, PendingCorrelation, AIVCS_EVENT_TYPES, HITL_EVENT_TYPES,
 };
+pub use metrics::DfcMetrics;
 pub use replay::{ReplayMode, ReplayRequest, ReplayResponse, RollbackRequest, RollbackResponse};
 pub use tenant::TenantContext;
 

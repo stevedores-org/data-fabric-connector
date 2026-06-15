@@ -51,22 +51,19 @@ impl AivcsClient for HttpAivcsClient {
             .json(req)
             .send()
             .await
-            .map_err(|e| DfcError::Upstream {
-                system: "aivcs-api".into(),
-                message: e.to_string(),
-            })?;
+            .map_err(|e| DfcError::upstream("aivcs-api", e.to_string(), None))?;
 
         if !resp.status().is_success() {
-            return Err(DfcError::Upstream {
-                system: "aivcs-api".into(),
-                message: format!("status {}", resp.status()),
-            });
+            return Err(DfcError::upstream(
+                "aivcs-api",
+                format!("status {}", resp.status()),
+                Some(resp.status().as_u16()),
+            ));
         }
 
-        resp.json().await.map_err(|e| DfcError::Upstream {
-            system: "aivcs-api".into(),
-            message: e.to_string(),
-        })
+        resp.json()
+            .await
+            .map_err(|e| DfcError::upstream("aivcs-api", e.to_string(), None))
     }
 
     async fn request_rollback(&self, req: &RollbackRequest) -> Result<RollbackResponse, DfcError> {
@@ -77,22 +74,19 @@ impl AivcsClient for HttpAivcsClient {
             .json(req)
             .send()
             .await
-            .map_err(|e| DfcError::Upstream {
-                system: "aivcs-api".into(),
-                message: e.to_string(),
-            })?;
+            .map_err(|e| DfcError::upstream("aivcs-api", e.to_string(), None))?;
 
         if !resp.status().is_success() {
-            return Err(DfcError::Upstream {
-                system: "aivcs-api".into(),
-                message: format!("status {}", resp.status()),
-            });
+            return Err(DfcError::upstream(
+                "aivcs-api",
+                format!("status {}", resp.status()),
+                Some(resp.status().as_u16()),
+            ));
         }
 
-        resp.json().await.map_err(|e| DfcError::Upstream {
-            system: "aivcs-api".into(),
-            message: e.to_string(),
-        })
+        resp.json()
+            .await
+            .map_err(|e| DfcError::upstream("aivcs-api", e.to_string(), None))
     }
 
     async fn fetch_review_fragments(
@@ -111,25 +105,22 @@ impl AivcsClient for HttpAivcsClient {
             .header("X-Tenant-Id", tenant_id)
             .send()
             .await
-            .map_err(|e| DfcError::Upstream {
-                system: "aivcs-api".into(),
-                message: e.to_string(),
-            })?;
+            .map_err(|e| DfcError::upstream("aivcs-api", e.to_string(), None))?;
 
         if resp.status().as_u16() == 404 {
             return Err(DfcError::NotFound(format!("review/{review_id}")));
         }
         if !resp.status().is_success() {
-            return Err(DfcError::Upstream {
-                system: "aivcs-api".into(),
-                message: format!("status {}", resp.status()),
-            });
+            return Err(DfcError::upstream(
+                "aivcs-api",
+                format!("status {}", resp.status()),
+                Some(resp.status().as_u16()),
+            ));
         }
 
-        resp.json().await.map_err(|e| DfcError::Upstream {
-            system: "aivcs-api".into(),
-            message: e.to_string(),
-        })
+        resp.json()
+            .await
+            .map_err(|e| DfcError::upstream("aivcs-api", e.to_string(), None))
     }
 
     async fn submit_review_decision(
@@ -148,22 +139,19 @@ impl AivcsClient for HttpAivcsClient {
             .json(payload)
             .send()
             .await
-            .map_err(|e| DfcError::Upstream {
-                system: "aivcs-api".into(),
-                message: e.to_string(),
-            })?;
+            .map_err(|e| DfcError::upstream("aivcs-api", e.to_string(), None))?;
 
         if !resp.status().is_success() {
-            return Err(DfcError::Upstream {
-                system: "aivcs-api".into(),
-                message: format!("status {}", resp.status()),
-            });
+            return Err(DfcError::upstream(
+                "aivcs-api",
+                format!("status {}", resp.status()),
+                Some(resp.status().as_u16()),
+            ));
         }
 
-        resp.json().await.map_err(|e| DfcError::Upstream {
-            system: "aivcs-api".into(),
-            message: e.to_string(),
-        })
+        resp.json()
+            .await
+            .map_err(|e| DfcError::upstream("aivcs-api", e.to_string(), None))
     }
 }
 
