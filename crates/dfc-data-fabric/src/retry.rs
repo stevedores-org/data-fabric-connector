@@ -2,6 +2,7 @@ use std::future::Future;
 use std::time::Duration;
 
 use dfc_core::{DfcError, DfcMetrics};
+use rand::Rng;
 use tokio::time::sleep;
 
 /// Default retry policy for transient upstream failures (5xx / 429).
@@ -55,10 +56,49 @@ where
                     metrics.inc_retries();
                 }
                 tracing::warn!(attempt, error = %err, "retrying upstream operation");
-                sleep(backoff).await;
+                sleep(jitter(backoff)).await;
                 backoff = (backoff * 2).min(policy.max_backoff);
             }
             Err(err) => return Err(err),
         }
+    }
+}
+
+/// Equal-jitter backoff: returns a duration in `[backoff/2, backoff]`.
+///
+/// M1: deterministic doubling (the previous behaviour) synchronises a
+/// thundering herd at every upstream restart. Equal-jitter caps the wait at
+/// the same ceiling but spreads the wake-ups across half the window.
+fn jitter(backoff: Duration) -> Duration {
+    let half = backoff / 2;
+    let extra_ms = backoff
+        .checked_sub(half)
+        .map(|d| d.as_millis() as u64)
+        .unwrap_or(0);
+    if extra_ms == 0 {
+        return backoff;
+    }
+    let extra = rand::thread_rng().gen_range(0..=extra_ms);
+    half + Duration::from_millis(extra)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn jitter_stays_inside_half_to_full_window() {
+        let base = Duration::from_millis(400);
+        for _ in 0..100 {
+            let d = jitter(base);
+            assert!(d >= base / 2, "{:?} < half of {:?}", d, base);
+            assert!(d <= base, "{:?} > full {:?}", d, base);
+        }
+    }
+
+    #[test]
+    fn jitter_handles_zero_and_one_ms() {
+        assert_eq!(jitter(Duration::from_millis(0)), Duration::from_millis(0));
+        assert_eq!(jitter(Duration::from_millis(1)), Duration::from_millis(1));
     }
 }

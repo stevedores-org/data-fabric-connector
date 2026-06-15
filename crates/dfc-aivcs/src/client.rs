@@ -2,6 +2,7 @@ use async_trait::async_trait;
 use dfc_core::{DfcError, ReplayRequest, ReplayResponse, RollbackRequest, RollbackResponse};
 use reqwest::Client;
 use serde::{Deserialize, Serialize};
+use urlencoding::encode as urlenc;
 
 use crate::config::AivcsConfig;
 use crate::review::{ReviewDecisionPayload, ReviewDecisionResult, ReviewFragments};
@@ -94,10 +95,11 @@ impl AivcsClient for HttpAivcsClient {
         tenant_id: &str,
         review_id: &str,
     ) -> Result<ReviewFragments, DfcError> {
+        // H5: review_id is caller-controlled.
         let url = format!(
             "{}/v1/hitl/reviews/{}",
             self.config.base_url.trim_end_matches('/'),
-            review_id
+            urlenc(review_id)
         );
         let resp = self
             .http
@@ -130,7 +132,7 @@ impl AivcsClient for HttpAivcsClient {
         let url = format!(
             "{}/v1/hitl/reviews/{}/decision",
             self.config.base_url.trim_end_matches('/'),
-            payload.review_id
+            urlenc(&payload.review_id)
         );
         let resp = self
             .http
@@ -177,10 +179,7 @@ impl AivcsClient for MockAivcsClient {
         }
 
         Ok(ReplayResponse {
-            replay_id: format!(
-                "replay_{}",
-                &req.idempotency_key[..8.min(req.idempotency_key.len())]
-            ),
+            replay_id: format!("replay_{}", short_idempotency_key(&req.idempotency_key)),
             status: "accepted".into(),
             snapshot_ids,
             data_fabric_event_id: None,
@@ -190,10 +189,7 @@ impl AivcsClient for MockAivcsClient {
 
     async fn request_rollback(&self, req: &RollbackRequest) -> Result<RollbackResponse, DfcError> {
         Ok(RollbackResponse {
-            rollback_id: format!(
-                "rollback_{}",
-                &req.idempotency_key[..8.min(req.idempotency_key.len())]
-            ),
+            rollback_id: format!("rollback_{}", short_idempotency_key(&req.idempotency_key)),
             status: "accepted".into(),
             data_fabric_event_id: None,
             aivcs_operation_id: Some("aivcs_op_stub".into()),
@@ -226,8 +222,76 @@ impl AivcsClient for MockAivcsClient {
         Ok(ReviewDecisionResult {
             operation_id: format!(
                 "aivcs_op_{}",
-                &payload.idempotency_key[..8.min(payload.idempotency_key.len())]
+                short_idempotency_key(&payload.idempotency_key)
             ),
         })
+    }
+}
+
+/// Truncate `idempotency_key` to at most 8 *characters* (not bytes).
+///
+/// Slicing on byte indices (e.g. `&key[..8.min(key.len())]`) panics when the
+/// byte index falls inside a multi-byte UTF-8 character. Callers cannot assume
+/// idempotency keys are ASCII, so we iterate by `char` instead.
+fn short_idempotency_key(key: &str) -> String {
+    key.chars().take(8).collect()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[tokio::test]
+    async fn mock_replay_accepts_multibyte_idempotency_key() {
+        // C1 regression: byte-slice on `&key[..8]` panicked when byte 8 fell
+        // inside a multi-byte UTF-8 char. Reachable by any caller in Mock
+        // (default) mode.
+        let mock = MockAivcsClient;
+        let mut req = ReplayRequest {
+            tenant_id: "tenant-a".into(),
+            repo: None,
+            run_id: "run-1".into(),
+            task_id: None,
+            from_snapshot: None,
+            to_snapshot: None,
+            target_snapshot_id: None,
+            mode: None,
+            idempotency_key: "a🚀🚀🚀b".into(),
+        };
+        // pre-fix this panics inside the async task with "byte index 8 is not
+        // a char boundary"; post-fix it returns Ok and truncates by char.
+        let resp = mock.request_replay(&req).await.expect("must not panic");
+        assert_eq!(resp.replay_id, "replay_a🚀🚀🚀b");
+
+        let rollback = RollbackRequest {
+            tenant_id: "tenant-a".into(),
+            branch_id: "branch-1".into(),
+            target_snapshot_id: "snap-1".into(),
+            reason: "rollback test".into(),
+            idempotency_key: req.idempotency_key.clone(),
+        };
+        let resp = mock.request_rollback(&rollback).await.unwrap();
+        assert_eq!(resp.rollback_id, "rollback_a🚀🚀🚀b");
+
+        // C1: third site — submit_review_decision had the same byte-slice bug.
+        let payload = ReviewDecisionPayload {
+            tenant_id: "tenant-a".into(),
+            review_id: "review-1".into(),
+            decision: "approve".into(),
+            comment: None,
+            idempotency_key: req.idempotency_key.clone(),
+            run_id: None,
+            task_id: None,
+        };
+        let resp = mock
+            .submit_review_decision(&payload)
+            .await
+            .expect("must not panic");
+        assert_eq!(resp.operation_id, "aivcs_op_a🚀🚀🚀b");
+
+        // Long-input truncation lands cleanly on the 8th char.
+        req.idempotency_key = "🚀".repeat(20);
+        let resp = mock.request_replay(&req).await.unwrap();
+        assert_eq!(resp.replay_id.chars().filter(|c| *c == '🚀').count(), 8);
     }
 }

@@ -32,5 +32,6 @@ tracing-opentelemetry = "0.28"
 tracing-subscriber = { workspace = true }
 
 [dev-dependencies]
+async-trait = { workspace = true }
 reqwest = { workspace = true }
 tower = { version = "0.5", features = ["util"] }
