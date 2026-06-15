@@ -28,13 +28,13 @@ impl HitlReviewBundle {
     }
 }
 
-pub struct ReviewBundleAssembler<C: DataFabricClient, A: AivcsClient> {
-    data_fabric: Arc<C>,
-    aivcs: Arc<A>,
+pub struct ReviewBundleAssembler {
+    data_fabric: Arc<dyn DataFabricClient>,
+    aivcs: Arc<dyn AivcsClient>,
 }
 
-impl<C: DataFabricClient, A: AivcsClient> ReviewBundleAssembler<C, A> {
-    pub fn new(data_fabric: Arc<C>, aivcs: Arc<A>) -> Self {
+impl ReviewBundleAssembler {
+    pub fn new(data_fabric: Arc<dyn DataFabricClient>, aivcs: Arc<dyn AivcsClient>) -> Self {
         Self { data_fabric, aivcs }
     }
 
@@ -118,8 +118,8 @@ mod tests {
     #[tokio::test]
     async fn assemble_returns_404_when_review_unknown() {
         let assembler = ReviewBundleAssembler::new(
-            Arc::new(MockDataFabricClient::default()),
-            Arc::new(MockAivcsClient),
+            Arc::new(MockDataFabricClient::default()) as Arc<dyn DataFabricClient>,
+            Arc::new(MockAivcsClient) as Arc<dyn AivcsClient>,
         );
         let err = assembler
             .assemble("tenant-a", "missing-review")

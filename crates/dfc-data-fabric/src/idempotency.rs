@@ -61,12 +61,12 @@ pub trait IdempotencyStore: Send + Sync {
     async fn put(&self, tenant_id: &str, key: &str, event: &DfcEvent) -> Result<(), DfcError>;
 }
 
-struct GenericDataFabricIdempotencyStore<C: DataFabricClient + ?Sized> {
-    client: Arc<C>,
+struct DataFabricIdempotencyStore {
+    client: Arc<dyn DataFabricClient>,
 }
 
 #[async_trait]
-impl<C: DataFabricClient + ?Sized> IdempotencyStore for GenericDataFabricIdempotencyStore<C> {
+impl IdempotencyStore for DataFabricIdempotencyStore {
     async fn get(&self, tenant_id: &str, key: &str) -> Result<Option<DfcEvent>, DfcError> {
         self.client.get_event_by_idempotency(tenant_id, key).await
     }
@@ -182,14 +182,12 @@ impl IdempotencyStore for RedisIdempotencyStore {
     }
 }
 
-pub fn build_idempotency_store<C: DataFabricClient + 'static>(
+pub fn build_idempotency_store(
     config: &IdempotencyConfig,
-    client: Arc<C>,
+    client: Arc<dyn DataFabricClient>,
 ) -> Result<Arc<dyn IdempotencyStore>, DfcError> {
     match config.backend {
-        IdempotencyBackendKind::DataFabric => {
-            Ok(Arc::new(GenericDataFabricIdempotencyStore { client }))
-        }
+        IdempotencyBackendKind::DataFabric => Ok(Arc::new(DataFabricIdempotencyStore { client })),
         IdempotencyBackendKind::Memory => Ok(Arc::new(MemoryIdempotencyStore::new(config.ttl))),
         IdempotencyBackendKind::Redis => {
             let redis_url = config

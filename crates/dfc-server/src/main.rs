@@ -5,14 +5,12 @@ use axum::{
     routing::{get, post},
     Json, Router,
 };
-use dfc_aivcs::{AivcsClient, MockAivcsClient, ReviewDecisionPayload};
+use dfc_aivcs::{AivcsClient, ReviewDecisionPayload};
 use dfc_core::{
     CorrelateRequest, CorrelationKind, CorrelationRecord, DfcError, DfcMetrics, InboundAivcsEvent,
     InboundHitlEvent, ReplayRequest, RollbackRequest, TenantContext, SCHEMA_VERSION,
 };
-use dfc_data_fabric::{
-    DataFabricClient, EventIngestService, IdempotencyConfig, IngestOutcome, MockDataFabricClient,
-};
+use dfc_data_fabric::{DataFabricClient, EventIngestService, IdempotencyConfig, IngestOutcome};
 use dfc_hitl::{ReviewBundleAssembler, ReviewDecisionRequest, ReviewDecisionResponse};
 use dfc_replay::{AuditContext, ReplayBridge};
 use serde::{Deserialize, Serialize};
@@ -22,6 +20,7 @@ use tracing::info;
 
 mod config;
 mod telemetry;
+mod upstream;
 
 use config::ServerConfig;
 
@@ -30,9 +29,10 @@ struct AppState {
     git_sha: &'static str,
     public_fqdn: String,
     public_url: String,
-    data_fabric: Arc<MockDataFabricClient>,
-    ingest: Arc<EventIngestService<MockDataFabricClient>>,
-    aivcs: Arc<MockAivcsClient>,
+    upstream_mode: &'static str,
+    data_fabric: Arc<dyn DataFabricClient>,
+    ingest: Arc<EventIngestService>,
+    aivcs: Arc<dyn AivcsClient>,
     metrics: Arc<DfcMetrics>,
 }
 
@@ -76,14 +76,15 @@ async fn main() -> anyhow::Result<()> {
     info!(
         port = cfg.port,
         fqdn = %cfg.public_fqdn,
+        upstream = cfg.upstream_mode.label(),
         "dfc-server starting"
     );
 
     let metrics = Arc::new(DfcMetrics::default());
-    let data_fabric = Arc::new(MockDataFabricClient::default());
+    let upstream = upstream::build_upstream_clients(cfg.upstream_mode, metrics.clone())?;
     let idempotency_config = IdempotencyConfig::from_env();
     let ingest = Arc::new(EventIngestService::with_options(
-        data_fabric.clone(),
+        upstream.data_fabric.clone(),
         idempotency_config,
         Some(metrics.clone()),
     )?);
@@ -92,9 +93,10 @@ async fn main() -> anyhow::Result<()> {
         git_sha: option_env!("GIT_SHA").unwrap_or("dev"),
         public_fqdn: cfg.public_fqdn.clone(),
         public_url: cfg.public_url(),
-        data_fabric,
+        upstream_mode: cfg.upstream_mode.label(),
+        data_fabric: upstream.data_fabric,
         ingest,
-        aivcs: Arc::new(MockAivcsClient),
+        aivcs: upstream.aivcs,
         metrics: metrics.clone(),
     };
 
@@ -138,10 +140,9 @@ async fn prometheus_metrics(State(state): State<AppState>) -> impl IntoResponse 
 }
 
 async fn readyz(State(state): State<AppState>) -> impl IntoResponse {
-    let _ = state.data_fabric.as_ref();
     Json(ReadinessResponse {
         ready: true,
-        mode: "mock-upstreams",
+        mode: state.upstream_mode,
     })
 }
 
@@ -472,12 +473,44 @@ mod tests {
     use super::*;
     use axum::body::Body;
     use axum::http::Request;
-    use dfc_data_fabric::IdempotencyBackendKind;
+    use dfc_data_fabric::{IdempotencyBackendKind, MockDataFabricClient};
     use dfc_hitl::HitlReviewBundle;
     use tower::ServiceExt;
 
+    use dfc_aivcs::MockAivcsClient;
+
+    fn mock_clients() -> (
+        Arc<dyn DataFabricClient>,
+        Arc<dyn AivcsClient>,
+        Arc<MockDataFabricClient>,
+    ) {
+        let mock = Arc::new(MockDataFabricClient::default());
+        (
+            mock.clone() as Arc<dyn DataFabricClient>,
+            Arc::new(MockAivcsClient) as Arc<dyn AivcsClient>,
+            mock,
+        )
+    }
+
+    fn test_app_state(
+        data_fabric: Arc<dyn DataFabricClient>,
+        ingest: Arc<EventIngestService>,
+        aivcs: Arc<dyn AivcsClient>,
+    ) -> AppState {
+        AppState {
+            git_sha: "test",
+            public_fqdn: config::DEFAULT_PUBLIC_FQDN.into(),
+            public_url: format!("https://{}", config::DEFAULT_PUBLIC_FQDN),
+            upstream_mode: UpstreamMode::Mock.label(),
+            data_fabric,
+            ingest,
+            aivcs,
+            metrics: Arc::new(DfcMetrics::default()),
+        }
+    }
+
     fn app() -> Router {
-        let data_fabric = Arc::new(MockDataFabricClient::default());
+        let (data_fabric, aivcs, _) = mock_clients();
         let idempotency_config = IdempotencyConfig {
             backend: IdempotencyBackendKind::Memory,
             ttl: dfc_data_fabric::MIN_IDEMPOTENCY_TTL,
@@ -487,15 +520,7 @@ mod tests {
             EventIngestService::with_options(data_fabric.clone(), idempotency_config, None)
                 .expect("test idempotency store"),
         );
-        let state = AppState {
-            git_sha: "test",
-            public_fqdn: config::DEFAULT_PUBLIC_FQDN.into(),
-            public_url: format!("https://{}", config::DEFAULT_PUBLIC_FQDN),
-            data_fabric,
-            ingest,
-            aivcs: Arc::new(MockAivcsClient),
-            metrics: Arc::new(DfcMetrics::default()),
-        };
+        let state = test_app_state(data_fabric, ingest, aivcs);
         Router::new()
             .route("/healthz", get(healthz))
             .route("/v1/version", get(version))
@@ -733,11 +758,26 @@ mod tests {
         assert_eq!(resp_resolve3.status(), StatusCode::FORBIDDEN);
     }
 
+    use config::UpstreamMode;
+
+    #[tokio::test]
+    async fn upstream_mode_defaults_to_mock_without_tenant_secret() {
+        std::env::remove_var("DFC_UPSTREAM_MODE");
+        std::env::remove_var("DATA_FABRIC_TENANT_ID");
+        assert_eq!(UpstreamMode::from_env(), UpstreamMode::Mock);
+    }
+
+    #[tokio::test]
+    async fn upstream_mode_selects_production_when_tenant_id_set() {
+        std::env::remove_var("DFC_UPSTREAM_MODE");
+        std::env::set_var("DATA_FABRIC_TENANT_ID", "tenant-a");
+        assert_eq!(UpstreamMode::from_env(), UpstreamMode::Production);
+        std::env::remove_var("DATA_FABRIC_TENANT_ID");
+    }
+
     #[tokio::test]
     async fn cross_tenant_lookup_forbidden_and_audited() {
-        use std::sync::Arc;
-        // Prepare a MockDataFabricClient that already has a correlation for tenant-b
-        let data_fabric = Arc::new(MockDataFabricClient::default());
+        let mock = Arc::new(MockDataFabricClient::default());
         let req = dfc_core::CorrelateRequest {
             tenant_id: "tenant-b".into(),
             repo: None,
@@ -754,8 +794,9 @@ mod tests {
         };
         let record = dfc_core::CorrelationRecord::from(req);
         // store under tenant-b
-        data_fabric.store_correlation(&record).await.unwrap();
+        mock.store_correlation(&record).await.unwrap();
 
+        let data_fabric: Arc<dyn DataFabricClient> = mock.clone();
         let ingest = Arc::new(
             EventIngestService::with_options(
                 data_fabric.clone(),
@@ -768,15 +809,7 @@ mod tests {
             )
             .expect("test idempotency store"),
         );
-        let state = AppState {
-            git_sha: "test",
-            public_fqdn: config::DEFAULT_PUBLIC_FQDN.into(),
-            public_url: format!("https://{}", config::DEFAULT_PUBLIC_FQDN),
-            data_fabric: data_fabric.clone(),
-            ingest,
-            aivcs: Arc::new(MockAivcsClient),
-            metrics: Arc::new(DfcMetrics::default()),
-        };
+        let state = test_app_state(data_fabric, ingest, Arc::new(MockAivcsClient));
         let app = Router::new()
             .route("/v1/correlate/{kind}/{id}", get(correlate_get))
             .with_state(state);
@@ -1083,7 +1116,8 @@ mod tests {
 
     #[tokio::test]
     async fn chaos_duplicate_snapshot_creates_single_record() {
-        let data_fabric = Arc::new(MockDataFabricClient::default());
+        let mock = Arc::new(MockDataFabricClient::default());
+        let data_fabric: Arc<dyn DataFabricClient> = mock.clone();
         let app = {
             let ingest = Arc::new(
                 EventIngestService::with_options(
@@ -1097,15 +1131,7 @@ mod tests {
                 )
                 .expect("test idempotency store"),
             );
-            let state = AppState {
-                git_sha: "test",
-                public_fqdn: config::DEFAULT_PUBLIC_FQDN.into(),
-                public_url: format!("https://{}", config::DEFAULT_PUBLIC_FQDN),
-                data_fabric: data_fabric.clone(),
-                ingest,
-                aivcs: Arc::new(MockAivcsClient),
-                metrics: Arc::new(DfcMetrics::default()),
-            };
+            let state = test_app_state(data_fabric, ingest, Arc::new(MockAivcsClient));
             Router::new()
                 .route("/v1/events/aivcs", post(events_aivcs))
                 .with_state(state)
@@ -1123,12 +1149,13 @@ mod tests {
         let second = post_json(&app, "/v1/events/aivcs", "tenant-a", body).await;
         assert_eq!(first.status(), StatusCode::OK);
         assert_eq!(second.status(), StatusCode::OK);
-        assert_eq!(data_fabric.event_count().await, 1);
+        assert_eq!(mock.event_count().await, 1);
     }
 
     #[tokio::test]
     async fn chaos_out_of_order_branch_and_snapshot_both_recorded() {
-        let data_fabric = Arc::new(MockDataFabricClient::default());
+        let mock = Arc::new(MockDataFabricClient::default());
+        let data_fabric: Arc<dyn DataFabricClient> = mock.clone();
         let app = {
             let ingest = Arc::new(
                 EventIngestService::with_options(
@@ -1142,15 +1169,7 @@ mod tests {
                 )
                 .expect("test idempotency store"),
             );
-            let state = AppState {
-                git_sha: "test",
-                public_fqdn: config::DEFAULT_PUBLIC_FQDN.into(),
-                public_url: format!("https://{}", config::DEFAULT_PUBLIC_FQDN),
-                data_fabric: data_fabric.clone(),
-                ingest,
-                aivcs: Arc::new(MockAivcsClient),
-                metrics: Arc::new(DfcMetrics::default()),
-            };
+            let state = test_app_state(data_fabric, ingest, Arc::new(MockAivcsClient));
             Router::new()
                 .route("/v1/events/aivcs", post(events_aivcs))
                 .with_state(state)
@@ -1174,7 +1193,7 @@ mod tests {
         });
         let ingested = post_json(&app, "/v1/events/aivcs", "tenant-a", snapshot).await;
         assert_eq!(ingested.status(), StatusCode::OK);
-        assert_eq!(data_fabric.event_count().await, 2);
+        assert_eq!(mock.event_count().await, 2);
     }
 
     #[tokio::test]
