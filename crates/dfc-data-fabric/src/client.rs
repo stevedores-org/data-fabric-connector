@@ -536,3 +536,40 @@ fn correlation_lookup_keys(record: &CorrelationRecord) -> Vec<(String, String)> 
     keys.dedup();
     keys
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[tokio::test]
+    async fn get_correlation_returns_tenant_mismatch_if_present_elsewhere() {
+        let client = MockDataFabricClient::default();
+
+        let req = dfc_core::CorrelateRequest {
+            tenant_id: "tenant-b".into(),
+            repo: None,
+            kind: None,
+            source_system: None,
+            source_id: None,
+            target_system: None,
+            target_id: None,
+            data_fabric_run_id: Some("run-123".into()),
+            data_fabric_task_id: None,
+            aivcs_snapshot_id: None,
+            aivcs_branch: None,
+            metadata: serde_json::json!({}),
+        };
+        let record = dfc_core::CorrelationRecord::from(req);
+        // store under tenant-b
+        client.store_correlation(&record).await.unwrap();
+
+        // lookup as tenant-a should return TenantMismatch
+        let res = client.get_correlation("tenant-a", "run", "run-123").await;
+        match res {
+            Err(dfc_core::DfcError::TenantMismatch { expected: _, actual }) => {
+                assert_eq!(actual, "tenant-b");
+            }
+            other => panic!("unexpected result: {:?}", other),
+        }
+    }
+}

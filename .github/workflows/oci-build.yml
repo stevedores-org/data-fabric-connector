@@ -127,9 +127,7 @@ jobs:
           while IFS= read -r tag; do
             [ -n "$tag" ] || continue
             echo "Pushing ${GAR_IMAGE}:${tag}"
-            ./result | nix shell nixpkgs#skopeo -c skopeo copy \
-              --dest-creds="oauth2accesstoken:${ACCESS_TOKEN}" \
-              docker-archive:/dev/stdin \
-              "docker://${GAR_IMAGE}:${tag}"
+            nix shell nixpkgs#skopeo -c "skopeo copy --dest-creds=\"oauth2accesstoken:${ACCESS_TOKEN}\" docker-archive:./result docker://${GAR_IMAGE}:${tag}" \
+              || (echo "skopeo push failed for ${tag}" && exit 1)
           done < tags.txt
           echo "Pushed ${GAR_IMAGE} ($(tr '\n' ' ' < tags.txt))"
