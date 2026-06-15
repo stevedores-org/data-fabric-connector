@@ -7,6 +7,12 @@ pub enum UpstreamMode {
 }
 
 impl UpstreamMode {
+    fn tenant_id_configured() -> bool {
+        std::env::var("DATA_FABRIC_TENANT_ID")
+            .ok()
+            .is_some_and(|tenant_id| !tenant_id.is_empty())
+    }
+
     pub fn from_env() -> Self {
         match std::env::var("DFC_UPSTREAM_MODE")
             .unwrap_or_default()
@@ -15,7 +21,7 @@ impl UpstreamMode {
         {
             "production" | "prod" => Self::Production,
             "mock" => Self::Mock,
-            _ if std::env::var("DATA_FABRIC_TENANT_ID").is_ok() => Self::Production,
+            _ if Self::tenant_id_configured() => Self::Production,
             _ => Self::Mock,
         }
     }
