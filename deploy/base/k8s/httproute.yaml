@@ -2,6 +2,8 @@
 # Flux-deployed copy: lornu-ai/infra-code
 #   crossplane/gcp/hub/spoke/apps/dfc/overlays/gke/prod
 # Kustomization: apps-dfc-gke-prod
+#
+# GKE prod also ships HealthCheckPolicy (see healthcheckpolicy.yaml) via infra-code only.
 apiVersion: gateway.networking.k8s.io/v1
 kind: HTTPRoute
 metadata:
@@ -25,5 +27,5 @@ spec:
             value: /
       backendRefs:
         - name: dfc
-          port: 80
+          port: 8080
           weight: 1

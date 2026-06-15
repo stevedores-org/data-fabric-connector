@@ -11,9 +11,7 @@ use dfc_core::{
     InboundHitlEvent, ReplayRequest, RollbackRequest, TenantContext, SCHEMA_VERSION,
 };
 use dfc_data_fabric::{DataFabricClient, EventIngestService, IngestOutcome, MockDataFabricClient};
-use dfc_hitl::{
-    HitlReviewBundle, ReviewBundleAssembler, ReviewDecisionRequest, ReviewDecisionResponse,
-};
+use dfc_hitl::{ReviewBundleAssembler, ReviewDecisionRequest, ReviewDecisionResponse};
 use dfc_replay::{AuditContext, ReplayBridge};
 use serde::{Deserialize, Serialize};
 use std::sync::Arc;
@@ -454,6 +452,7 @@ mod tests {
     use super::*;
     use axum::body::Body;
     use axum::http::Request;
+    use dfc_hitl::HitlReviewBundle;
     use tower::ServiceExt;
 
     fn app() -> Router {
@@ -699,9 +698,58 @@ mod tests {
         let resp_resolve2 = get_request(&app, "/v1/correlate/branch/branch-abc", "tenant-a").await;
         assert_eq!(resp_resolve2.status(), StatusCode::OK);
 
-        // Resolve under a different tenant -> 404 Not Found (US-C2 / no leakage)
+        // Resolve under a different tenant -> 403 Forbidden (US-X1 tenant isolation)
         let resp_resolve3 = get_request(&app, "/v1/correlate/branch/feature-abc", "tenant-b").await;
-        assert_eq!(resp_resolve3.status(), StatusCode::NOT_FOUND);
+        assert_eq!(resp_resolve3.status(), StatusCode::FORBIDDEN);
+    }
+
+    #[tokio::test]
+    async fn cross_tenant_lookup_forbidden_and_audited() {
+        use std::sync::Arc;
+        // Prepare a MockDataFabricClient that already has a correlation for tenant-b
+        let data_fabric = Arc::new(MockDataFabricClient::default());
+        let req = dfc_core::CorrelateRequest {
+            tenant_id: "tenant-b".into(),
+            repo: None,
+            kind: None,
+            source_system: None,
+            source_id: None,
+            target_system: None,
+            target_id: None,
+            data_fabric_run_id: Some("run-123".into()),
+            data_fabric_task_id: None,
+            aivcs_snapshot_id: None,
+            aivcs_branch: None,
+            metadata: serde_json::json!({}),
+        };
+        let record = dfc_core::CorrelationRecord::from(req);
+        // store under tenant-b
+        data_fabric.store_correlation(&record).await.unwrap();
+
+        let ingest = Arc::new(EventIngestService::new(data_fabric.clone()));
+        let state = AppState {
+            git_sha: "test",
+            public_fqdn: config::DEFAULT_PUBLIC_FQDN.into(),
+            public_url: format!("https://{}", config::DEFAULT_PUBLIC_FQDN),
+            data_fabric: data_fabric.clone(),
+            ingest,
+            aivcs: Arc::new(MockAivcsClient),
+        };
+        let app = Router::new()
+            .route("/v1/correlate/{kind}/{id}", get(correlate_get))
+            .with_state(state);
+
+        let resp = app
+            .clone()
+            .oneshot(
+                Request::get("/v1/correlate/run/run-123")
+                    .header("x-tenant-id", "tenant-a")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::FORBIDDEN);
     }
 
     #[tokio::test]
@@ -792,7 +840,7 @@ mod tests {
         assert_eq!(unknown.status(), StatusCode::NOT_FOUND);
 
         let cross_tenant = get_request(&app, "/v1/hitl/reviews/rev-secret", "tenant-b").await;
-        assert_eq!(cross_tenant.status(), StatusCode::NOT_FOUND);
+        assert_eq!(cross_tenant.status(), StatusCode::FORBIDDEN);
     }
 
     #[tokio::test]
