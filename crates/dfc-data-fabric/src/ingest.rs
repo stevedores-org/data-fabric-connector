@@ -127,22 +127,22 @@ impl StagingStore {
     }
 }
 
-pub struct EventIngestService<C: DataFabricClient> {
-    client: Arc<C>,
+pub struct EventIngestService {
+    client: Arc<dyn DataFabricClient>,
     idempotency: Arc<dyn IdempotencyStore>,
     staging: Arc<RwLock<StagingStore>>,
     staging_ttl: Duration,
     metrics: Option<Arc<DfcMetrics>>,
 }
 
-impl<C: DataFabricClient + 'static> EventIngestService<C> {
-    pub fn new(client: Arc<C>) -> Self {
+impl EventIngestService {
+    pub fn new(client: Arc<dyn DataFabricClient>) -> Self {
         Self::with_options(client, IdempotencyConfig::from_env(), None)
             .expect("idempotency store configuration")
     }
 
     pub fn with_options(
-        client: Arc<C>,
+        client: Arc<dyn DataFabricClient>,
         idempotency_config: IdempotencyConfig,
         metrics: Option<Arc<DfcMetrics>>,
     ) -> Result<Self, DfcError> {

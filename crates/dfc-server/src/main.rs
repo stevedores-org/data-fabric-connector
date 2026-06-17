@@ -5,14 +5,12 @@ use axum::{
     routing::{get, post},
     Json, Router,
 };
-use dfc_aivcs::{AivcsClient, MockAivcsClient, ReviewDecisionPayload};
+use dfc_aivcs::{AivcsClient, ReviewDecisionPayload};
 use dfc_core::{
     CorrelateRequest, CorrelationKind, CorrelationRecord, DfcError, DfcMetrics, InboundAivcsEvent,
     InboundHitlEvent, ReplayRequest, RollbackRequest, TenantContext, SCHEMA_VERSION,
 };
-use dfc_data_fabric::{
-    DataFabricClient, EventIngestService, IdempotencyConfig, IngestOutcome, MockDataFabricClient,
-};
+use dfc_data_fabric::{DataFabricClient, EventIngestService, IdempotencyConfig, IngestOutcome};
 use dfc_hitl::{ReviewBundleAssembler, ReviewDecisionRequest, ReviewDecisionResponse};
 use dfc_replay::{AuditContext, ReplayBridge};
 use serde::{Deserialize, Serialize};
@@ -22,6 +20,7 @@ use tracing::info;
 
 mod config;
 mod telemetry;
+mod upstream;
 
 use config::ServerConfig;
 
@@ -30,9 +29,10 @@ struct AppState {
     git_sha: &'static str,
     public_fqdn: String,
     public_url: String,
-    data_fabric: Arc<MockDataFabricClient>,
-    ingest: Arc<EventIngestService<MockDataFabricClient>>,
-    aivcs: Arc<MockAivcsClient>,
+    upstream_mode: &'static str,
+    data_fabric: Arc<dyn DataFabricClient>,
+    ingest: Arc<EventIngestService>,
+    aivcs: Arc<dyn AivcsClient>,
     metrics: Arc<DfcMetrics>,
 }
 
@@ -76,14 +76,15 @@ async fn main() -> anyhow::Result<()> {
     info!(
         port = cfg.port,
         fqdn = %cfg.public_fqdn,
+        upstream = cfg.upstream_mode.label(),
         "dfc-server starting"
     );
 
     let metrics = Arc::new(DfcMetrics::default());
-    let data_fabric = Arc::new(MockDataFabricClient::default());
+    let upstream = upstream::build_upstream_clients(cfg.upstream_mode, metrics.clone())?;
     let idempotency_config = IdempotencyConfig::from_env();
     let ingest = Arc::new(EventIngestService::with_options(
-        data_fabric.clone(),
+        upstream.data_fabric.clone(),
         idempotency_config,
         Some(metrics.clone()),
     )?);
@@ -92,9 +93,10 @@ async fn main() -> anyhow::Result<()> {
         git_sha: option_env!("GIT_SHA").unwrap_or("dev"),
         public_fqdn: cfg.public_fqdn.clone(),
         public_url: cfg.public_url(),
-        data_fabric,
+        upstream_mode: cfg.upstream_mode.label(),
+        data_fabric: upstream.data_fabric,
         ingest,
-        aivcs: Arc::new(MockAivcsClient),
+        aivcs: upstream.aivcs,
         metrics: metrics.clone(),
     };
 
@@ -138,10 +140,9 @@ async fn prometheus_metrics(State(state): State<AppState>) -> impl IntoResponse 
 }
 
 async fn readyz(State(state): State<AppState>) -> impl IntoResponse {
-    let _ = state.data_fabric.as_ref();
     Json(ReadinessResponse {
         ready: true,
-        mode: "mock-upstreams",
+        mode: state.upstream_mode,
     })
 }
 
@@ -167,9 +168,15 @@ fn validate_field(s: &str, field_name: &str) -> Result<(), ApiError> {
 }
 
 fn tenant_from_headers(headers: &HeaderMap) -> Result<TenantContext, ApiError> {
+    // H1: PR #24 fixed the env-var auto-detect path, but the request-header path
+    // still accepted empty/whitespace `X-Tenant-Id`. That tenant value then
+    // flowed into upstream `get_correlation("", …)` calls. Mirror the
+    // `actor_from_headers` filter so missing-and-empty are treated identically.
     let tenant_id = headers
         .get("x-tenant-id")
         .and_then(|v| v.to_str().ok())
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
         .ok_or_else(|| ApiError::BadRequest("X-Tenant-Id header is required".into()))?;
     validate_field(tenant_id, "tenant_id")?;
     Ok(TenantContext::new(tenant_id.to_string()))
@@ -424,23 +431,53 @@ async fn hitl_review_decision(
         .await
         .map_err(ApiError::from)?;
 
-    let _ = state
-        .data_fabric
-        .bump_review_revision(&tenant.tenant_id, &review_id)
-        .await
-        .map_err(ApiError::from)?;
-
-    let aivcs_result = state
+    let aivcs_result = match state
         .aivcs
         .submit_review_decision(&ReviewDecisionPayload {
             tenant_id: tenant.tenant_id.clone(),
             review_id: review_id.clone(),
             decision: body.decision.as_str().into(),
             comment: body.comment.clone(),
-            idempotency_key: body.idempotency_key,
-            run_id: correlation.data_fabric_run_id,
-            task_id: correlation.data_fabric_task_id,
+            idempotency_key: body.idempotency_key.clone(),
+            run_id: correlation.data_fabric_run_id.clone(),
+            task_id: correlation.data_fabric_task_id.clone(),
         })
+        .await
+    {
+        Ok(res) => res,
+        Err(e) => {
+            // Compensating event: record that AIVCS submission failed so audit trail
+            // shows the attempted decision and the failure reason.
+            let mut failed_event = dfc_core::DfcEvent::new(
+                "hitl.review.decision.failed",
+                tenant.tenant_id.clone(),
+                body.idempotency_key.clone(),
+                dfc_core::SourceSystem::AivcsHumanInTheLoop,
+            );
+            failed_event.run_id = correlation.data_fabric_run_id.clone();
+            failed_event.task_id = correlation.data_fabric_task_id.clone();
+            failed_event.metadata = serde_json::json!({
+                "review_id": review_id,
+                "reviewer": body.reviewer.as_deref().unwrap_or("unknown"),
+                "comment": body.comment,
+                "decision": body.decision.as_str(),
+                "aivcs_error": format!("{}", e),
+            });
+
+            // Best-effort ingest of the compensating event — don't return its error
+            let _ = state.data_fabric.ingest_event(&failed_event).await;
+
+            return Err(ApiError::Upstream(format!(
+                "aivcs submit failed; compensating event recorded: {}",
+                e
+            )));
+        }
+    };
+
+    // Bump revision after AIVCS confirms to avoid stale ETag on failure
+    let _ = state
+        .data_fabric
+        .bump_review_revision(&tenant.tenant_id, &review_id)
         .await
         .map_err(ApiError::from)?;
 
@@ -551,12 +588,44 @@ mod tests {
     use super::*;
     use axum::body::Body;
     use axum::http::Request;
-    use dfc_data_fabric::IdempotencyBackendKind;
+    use dfc_data_fabric::{IdempotencyBackendKind, MockDataFabricClient};
     use dfc_hitl::HitlReviewBundle;
     use tower::ServiceExt;
 
+    use dfc_aivcs::MockAivcsClient;
+
+    fn mock_clients() -> (
+        Arc<dyn DataFabricClient>,
+        Arc<dyn AivcsClient>,
+        Arc<MockDataFabricClient>,
+    ) {
+        let mock = Arc::new(MockDataFabricClient::default());
+        (
+            mock.clone() as Arc<dyn DataFabricClient>,
+            Arc::new(MockAivcsClient) as Arc<dyn AivcsClient>,
+            mock,
+        )
+    }
+
+    fn test_app_state(
+        data_fabric: Arc<dyn DataFabricClient>,
+        ingest: Arc<EventIngestService>,
+        aivcs: Arc<dyn AivcsClient>,
+    ) -> AppState {
+        AppState {
+            git_sha: "test",
+            public_fqdn: config::DEFAULT_PUBLIC_FQDN.into(),
+            public_url: format!("https://{}", config::DEFAULT_PUBLIC_FQDN),
+            upstream_mode: UpstreamMode::Mock.label(),
+            data_fabric,
+            ingest,
+            aivcs,
+            metrics: Arc::new(DfcMetrics::default()),
+        }
+    }
+
     fn app() -> Router {
-        let data_fabric = Arc::new(MockDataFabricClient::default());
+        let (data_fabric, aivcs, _) = mock_clients();
         let idempotency_config = IdempotencyConfig {
             backend: IdempotencyBackendKind::Memory,
             ttl: dfc_data_fabric::MIN_IDEMPOTENCY_TTL,
@@ -566,15 +635,7 @@ mod tests {
             EventIngestService::with_options(data_fabric.clone(), idempotency_config, None)
                 .expect("test idempotency store"),
         );
-        let state = AppState {
-            git_sha: "test",
-            public_fqdn: config::DEFAULT_PUBLIC_FQDN.into(),
-            public_url: format!("https://{}", config::DEFAULT_PUBLIC_FQDN),
-            data_fabric,
-            ingest,
-            aivcs: Arc::new(MockAivcsClient),
-            metrics: Arc::new(DfcMetrics::default()),
-        };
+        let state = test_app_state(data_fabric, ingest, aivcs);
         Router::new()
             .route("/healthz", get(healthz))
             .route("/v1/version", get(version))
@@ -812,11 +873,34 @@ mod tests {
         assert_eq!(resp_resolve3.status(), StatusCode::FORBIDDEN);
     }
 
+    use config::UpstreamMode;
+
+    #[tokio::test]
+    async fn upstream_mode_defaults_to_mock_without_tenant_secret() {
+        std::env::remove_var("DFC_UPSTREAM_MODE");
+        std::env::remove_var("DATA_FABRIC_TENANT_ID");
+        assert_eq!(UpstreamMode::from_env(), UpstreamMode::Mock);
+    }
+
+    #[tokio::test]
+    async fn upstream_mode_selects_production_when_tenant_id_set() {
+        std::env::remove_var("DFC_UPSTREAM_MODE");
+        std::env::set_var("DATA_FABRIC_TENANT_ID", "tenant-a");
+        assert_eq!(UpstreamMode::from_env(), UpstreamMode::Production);
+        std::env::remove_var("DATA_FABRIC_TENANT_ID");
+    }
+
+    #[tokio::test]
+    async fn upstream_mode_defaults_to_mock_when_tenant_id_empty() {
+        std::env::remove_var("DFC_UPSTREAM_MODE");
+        std::env::set_var("DATA_FABRIC_TENANT_ID", "");
+        assert_eq!(UpstreamMode::from_env(), UpstreamMode::Mock);
+        std::env::remove_var("DATA_FABRIC_TENANT_ID");
+    }
+
     #[tokio::test]
     async fn cross_tenant_lookup_forbidden_and_audited() {
-        use std::sync::Arc;
-        // Prepare a MockDataFabricClient that already has a correlation for tenant-b
-        let data_fabric = Arc::new(MockDataFabricClient::default());
+        let mock = Arc::new(MockDataFabricClient::default());
         let req = dfc_core::CorrelateRequest {
             tenant_id: "tenant-b".into(),
             repo: None,
@@ -833,8 +917,9 @@ mod tests {
         };
         let record = dfc_core::CorrelationRecord::from(req);
         // store under tenant-b
-        data_fabric.store_correlation(&record).await.unwrap();
+        mock.store_correlation(&record).await.unwrap();
 
+        let data_fabric: Arc<dyn DataFabricClient> = mock.clone();
         let ingest = Arc::new(
             EventIngestService::with_options(
                 data_fabric.clone(),
@@ -847,15 +932,7 @@ mod tests {
             )
             .expect("test idempotency store"),
         );
-        let state = AppState {
-            git_sha: "test",
-            public_fqdn: config::DEFAULT_PUBLIC_FQDN.into(),
-            public_url: format!("https://{}", config::DEFAULT_PUBLIC_FQDN),
-            data_fabric: data_fabric.clone(),
-            ingest,
-            aivcs: Arc::new(MockAivcsClient),
-            metrics: Arc::new(DfcMetrics::default()),
-        };
+        let state = test_app_state(data_fabric, ingest, Arc::new(MockAivcsClient));
         let app = Router::new()
             .route("/v1/correlate/{kind}/{id}", get(correlate_get))
             .with_state(state);
@@ -1162,7 +1239,8 @@ mod tests {
 
     #[tokio::test]
     async fn chaos_duplicate_snapshot_creates_single_record() {
-        let data_fabric = Arc::new(MockDataFabricClient::default());
+        let mock = Arc::new(MockDataFabricClient::default());
+        let data_fabric: Arc<dyn DataFabricClient> = mock.clone();
         let app = {
             let ingest = Arc::new(
                 EventIngestService::with_options(
@@ -1176,15 +1254,7 @@ mod tests {
                 )
                 .expect("test idempotency store"),
             );
-            let state = AppState {
-                git_sha: "test",
-                public_fqdn: config::DEFAULT_PUBLIC_FQDN.into(),
-                public_url: format!("https://{}", config::DEFAULT_PUBLIC_FQDN),
-                data_fabric: data_fabric.clone(),
-                ingest,
-                aivcs: Arc::new(MockAivcsClient),
-                metrics: Arc::new(DfcMetrics::default()),
-            };
+            let state = test_app_state(data_fabric, ingest, Arc::new(MockAivcsClient));
             Router::new()
                 .route("/v1/events/aivcs", post(events_aivcs))
                 .with_state(state)
@@ -1202,12 +1272,13 @@ mod tests {
         let second = post_json(&app, "/v1/events/aivcs", "tenant-a", body).await;
         assert_eq!(first.status(), StatusCode::OK);
         assert_eq!(second.status(), StatusCode::OK);
-        assert_eq!(data_fabric.event_count().await, 1);
+        assert_eq!(mock.event_count().await, 1);
     }
 
     #[tokio::test]
     async fn chaos_out_of_order_branch_and_snapshot_both_recorded() {
-        let data_fabric = Arc::new(MockDataFabricClient::default());
+        let mock = Arc::new(MockDataFabricClient::default());
+        let data_fabric: Arc<dyn DataFabricClient> = mock.clone();
         let app = {
             let ingest = Arc::new(
                 EventIngestService::with_options(
@@ -1221,15 +1292,7 @@ mod tests {
                 )
                 .expect("test idempotency store"),
             );
-            let state = AppState {
-                git_sha: "test",
-                public_fqdn: config::DEFAULT_PUBLIC_FQDN.into(),
-                public_url: format!("https://{}", config::DEFAULT_PUBLIC_FQDN),
-                data_fabric: data_fabric.clone(),
-                ingest,
-                aivcs: Arc::new(MockAivcsClient),
-                metrics: Arc::new(DfcMetrics::default()),
-            };
+            let state = test_app_state(data_fabric, ingest, Arc::new(MockAivcsClient));
             Router::new()
                 .route("/v1/events/aivcs", post(events_aivcs))
                 .with_state(state)
@@ -1253,7 +1316,7 @@ mod tests {
         });
         let ingested = post_json(&app, "/v1/events/aivcs", "tenant-a", snapshot).await;
         assert_eq!(ingested.status(), StatusCode::OK);
-        assert_eq!(data_fabric.event_count().await, 2);
+        assert_eq!(mock.event_count().await, 2);
     }
 
     #[tokio::test]
@@ -1342,5 +1405,156 @@ mod tests {
         )
         .unwrap();
         assert_eq!(body.error, "run_id contains forbidden characters");
+    }
+
+    #[tokio::test]
+    async fn tenant_header_rejects_empty_and_whitespace() {
+        // H1 regression: PR #24 fixed the env-var path; the header path still
+        // accepted empty / whitespace tenant IDs. Both forms must 400 with the
+        // same error as a missing header.
+        let app = app();
+        let body = serde_json::json!({
+            "event_type": "aivcs.snapshot.created",
+            "tenant_id": "tenant-a",
+            "idempotency_key": "evt-1",
+            "aivcs_ref": "aivcs:snapshot:s1",
+            "run_id": "run-1"
+        });
+
+        for tenant_value in ["", "   "] {
+            let resp = post_json(&app, "/v1/events/aivcs", tenant_value, body.clone()).await;
+            assert_eq!(
+                resp.status(),
+                StatusCode::BAD_REQUEST,
+                "X-Tenant-Id={:?} must 400",
+                tenant_value
+            );
+        }
+    }
+
+    /// Test fixture: AIVCS client that always errors.
+    ///
+    /// Used to drive the unhappy path through `hitl_review_decision` so we
+    /// can assert that side effects (the review revision bump) do *not*
+    /// happen when AIVCS fails. Kept inside the test module so production
+    /// code doesn't grow a "fail on demand" knob.
+    #[derive(Default)]
+    struct FailingAivcsClient;
+
+    #[async_trait::async_trait]
+    impl AivcsClient for FailingAivcsClient {
+        async fn request_replay(
+            &self,
+            _: &dfc_core::ReplayRequest,
+        ) -> Result<dfc_core::ReplayResponse, dfc_core::DfcError> {
+            Err(dfc_core::DfcError::upstream(
+                "aivcs-api",
+                "forced failure (test)",
+                Some(500),
+            ))
+        }
+        async fn request_rollback(
+            &self,
+            _: &dfc_core::RollbackRequest,
+        ) -> Result<dfc_core::RollbackResponse, dfc_core::DfcError> {
+            Err(dfc_core::DfcError::upstream(
+                "aivcs-api",
+                "forced failure (test)",
+                Some(500),
+            ))
+        }
+        async fn fetch_review_fragments(
+            &self,
+            _: &str,
+            _: &str,
+        ) -> Result<dfc_aivcs::ReviewFragments, dfc_core::DfcError> {
+            Err(dfc_core::DfcError::upstream(
+                "aivcs-api",
+                "forced failure (test)",
+                Some(500),
+            ))
+        }
+        async fn submit_review_decision(
+            &self,
+            _: &dfc_aivcs::ReviewDecisionPayload,
+        ) -> Result<dfc_aivcs::ReviewDecisionResult, dfc_core::DfcError> {
+            Err(dfc_core::DfcError::upstream(
+                "aivcs-api",
+                "forced failure (test)",
+                Some(500),
+            ))
+        }
+    }
+
+    fn app_with_aivcs(
+        data_fabric: Arc<dyn DataFabricClient>,
+        aivcs: Arc<dyn AivcsClient>,
+    ) -> Router {
+        let idempotency_config = IdempotencyConfig {
+            backend: IdempotencyBackendKind::Memory,
+            ttl: dfc_data_fabric::MIN_IDEMPOTENCY_TTL,
+            redis_url: None,
+        };
+        let ingest = Arc::new(
+            EventIngestService::with_options(data_fabric.clone(), idempotency_config, None)
+                .expect("test idempotency store"),
+        );
+        let state = test_app_state(data_fabric, ingest, aivcs);
+        Router::new()
+            .route("/v1/correlate", post(correlate_create))
+            .route(
+                "/v1/hitl/reviews/{review_id}/decision",
+                post(hitl_review_decision),
+            )
+            .with_state(state)
+    }
+
+    #[tokio::test]
+    async fn revision_does_not_bump_when_aivcs_submit_fails() {
+        // M3 regression: previously the review revision bumped BEFORE the
+        // AIVCS submit. An AIVCS failure would leave clients refetching a
+        // bumped ETag for downstream state that never changed. Post-fix the
+        // revision must be unchanged whenever AIVCS errors.
+        let mock = Arc::new(MockDataFabricClient::default());
+        let data_fabric: Arc<dyn DataFabricClient> = mock.clone();
+        let aivcs: Arc<dyn AivcsClient> = Arc::new(FailingAivcsClient);
+        let app = app_with_aivcs(data_fabric, aivcs);
+
+        // Seed a correlation so hitl_review_decision can find it.
+        let correlate = serde_json::json!({
+            "tenant_id": "tenant-a",
+            "data_fabric_run_id": "run-m3",
+            "metadata": { "review_id": "rev-m3" }
+        });
+        let r = post_json(&app, "/v1/correlate", "tenant-a", correlate).await;
+        assert_eq!(r.status(), StatusCode::OK);
+
+        let rev_before = mock.review_revision("tenant-a", "rev-m3").await.unwrap();
+
+        let decision = serde_json::json!({
+            "decision": "approved",
+            "comment": "test",
+            "idempotency_key": "m3-key"
+        });
+        let resp = post_json(
+            &app,
+            "/v1/hitl/reviews/rev-m3/decision",
+            "tenant-a",
+            decision,
+        )
+        .await;
+        // AIVCS returned 500 → handler maps to upstream/5xx; either is fine,
+        // just must not be 2xx.
+        assert!(
+            !resp.status().is_success(),
+            "expected error status, got {}",
+            resp.status()
+        );
+
+        let rev_after = mock.review_revision("tenant-a", "rev-m3").await.unwrap();
+        assert_eq!(
+            rev_before, rev_after,
+            "review revision must not bump when AIVCS submit fails (M3)"
+        );
     }
 }
