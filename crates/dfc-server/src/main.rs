@@ -63,7 +63,7 @@ struct StagedIngestResponse {
     pending: Vec<dfc_core::PendingCorrelation>,
 }
 
-#[derive(Serialize)]
+#[derive(Serialize, Deserialize)]
 struct ErrorBody {
     error: String,
 }
@@ -156,18 +156,30 @@ async fn version(State(state): State<AppState>) -> Json<VersionResponse> {
     })
 }
 
+fn validate_field(s: &str, field_name: &str) -> Result<(), ApiError> {
+    for c in s.chars() {
+        if !(c.is_ascii_alphanumeric() || c == '.' || c == '_' || c == ':' || c == '-') {
+            return Err(ApiError::BadRequest(format!(
+                "{field_name} contains forbidden characters"
+            )));
+        }
+    }
+    Ok(())
+}
+
 fn tenant_from_headers(headers: &HeaderMap) -> Result<TenantContext, ApiError> {
     // H1: PR #24 fixed the env-var auto-detect path, but the request-header path
     // still accepted empty/whitespace `X-Tenant-Id`. That tenant value then
     // flowed into upstream `get_correlation("", …)` calls. Mirror the
     // `actor_from_headers` filter so missing-and-empty are treated identically.
-    headers
+    let tenant_id = headers
         .get("x-tenant-id")
         .and_then(|v| v.to_str().ok())
         .map(str::trim)
         .filter(|s| !s.is_empty())
-        .map(|s| TenantContext::new(s.to_string()))
-        .ok_or_else(|| ApiError::BadRequest("X-Tenant-Id header is required".into()))
+        .ok_or_else(|| ApiError::BadRequest("X-Tenant-Id header is required".into()))?;
+    validate_field(tenant_id, "tenant_id")?;
+    Ok(TenantContext::new(tenant_id.to_string()))
 }
 
 fn actor_from_headers(headers: &HeaderMap) -> String {
@@ -192,6 +204,26 @@ async fn correlate_create(
 
     if body.tenant_id.trim().is_empty() {
         return Err(ApiError::BadRequest("tenant_id is required".into()));
+    }
+
+    validate_field(&body.tenant_id, "tenant_id")?;
+    if let Some(run_id) = &body.data_fabric_run_id {
+        validate_field(run_id, "data_fabric_run_id")?;
+    }
+    if let Some(task_id) = &body.data_fabric_task_id {
+        validate_field(task_id, "data_fabric_task_id")?;
+    }
+    if let Some(snapshot_id) = &body.aivcs_snapshot_id {
+        validate_field(snapshot_id, "aivcs_snapshot_id")?;
+    }
+    if let Some(branch) = &body.aivcs_branch {
+        validate_field(branch, "aivcs_branch")?;
+    }
+    if let Some(source_id) = &body.source_id {
+        validate_field(source_id, "source_id")?;
+    }
+    if let Some(target_id) = &body.target_id {
+        validate_field(target_id, "target_id")?;
     }
 
     body.validate().map_err(ApiError::from)?;
@@ -239,6 +271,8 @@ async fn correlate_get(
     Path((kind, id)): Path<(String, String)>,
 ) -> Result<Json<CorrelationRecord>, ApiError> {
     let tenant = tenant_from_headers(&headers)?;
+    validate_field(&kind, "kind")?;
+    validate_field(&id, "id")?;
     if CorrelationKind::parse(&kind).is_none() {
         return Err(ApiError::BadRequest(format!("unknown kind: {kind}")));
     }
@@ -264,6 +298,18 @@ async fn events_aivcs(
         return Err(ApiError::BadRequest("idempotency_key is required".into()));
     }
 
+    validate_field(&body.idempotency_key, "idempotency_key")?;
+    validate_field(&body.tenant_id, "tenant_id")?;
+    if let Some(run_id) = &body.run_id {
+        validate_field(run_id, "run_id")?;
+    }
+    if let Some(task_id) = &body.task_id {
+        validate_field(task_id, "task_id")?;
+    }
+    if let Some(aivcs_ref) = &body.aivcs_ref {
+        validate_field(aivcs_ref, "aivcs_ref")?;
+    }
+
     let outcome = state
         .ingest
         .ingest_aivcs(body)
@@ -282,6 +328,15 @@ async fn events_hitl(
 
     if body.idempotency_key.trim().is_empty() {
         return Err(ApiError::BadRequest("idempotency_key is required".into()));
+    }
+
+    validate_field(&body.idempotency_key, "idempotency_key")?;
+    validate_field(&body.tenant_id, "tenant_id")?;
+    if let Some(review_id) = &body.review_id {
+        validate_field(review_id, "review_id")?;
+    }
+    if let Some(run_id) = &body.run_id {
+        validate_field(run_id, "run_id")?;
     }
 
     let outcome = state
@@ -315,6 +370,7 @@ async fn hitl_review_get(
     Path(review_id): Path<String>,
 ) -> Result<Response, ApiError> {
     let tenant = tenant_from_headers(&headers)?;
+    validate_field(&review_id, "review_id")?;
     let assembler = ReviewBundleAssembler::new(state.data_fabric.clone(), state.aivcs.clone());
     let bundle = assembler
         .assemble(&tenant.tenant_id, &review_id)
@@ -341,10 +397,12 @@ async fn hitl_review_decision(
     Json(body): Json<ReviewDecisionRequest>,
 ) -> Result<Json<ReviewDecisionResponse>, ApiError> {
     let tenant = tenant_from_headers(&headers)?;
+    validate_field(&review_id, "review_id")?;
 
     if body.idempotency_key.trim().is_empty() {
         return Err(ApiError::BadRequest("idempotency_key is required".into()));
     }
+    validate_field(&body.idempotency_key, "idempotency_key")?;
 
     let correlation = state
         .data_fabric
@@ -440,6 +498,22 @@ async fn replay_request(
     let tenant = tenant_from_headers(&headers)?;
     tenant.ensure(&body.tenant_id)?;
 
+    validate_field(&body.tenant_id, "tenant_id")?;
+    validate_field(&body.run_id, "run_id")?;
+    validate_field(&body.idempotency_key, "idempotency_key")?;
+    if let Some(task_id) = &body.task_id {
+        validate_field(task_id, "task_id")?;
+    }
+    if let Some(from_snapshot) = &body.from_snapshot {
+        validate_field(from_snapshot, "from_snapshot")?;
+    }
+    if let Some(to_snapshot) = &body.to_snapshot {
+        validate_field(to_snapshot, "to_snapshot")?;
+    }
+    if let Some(target_snapshot_id) = &body.target_snapshot_id {
+        validate_field(target_snapshot_id, "target_snapshot_id")?;
+    }
+
     let bridge = ReplayBridge::new(state.data_fabric.clone(), state.aivcs.clone())
         .with_metrics(state.metrics.clone());
     let response = bridge
@@ -457,6 +531,11 @@ async fn rollback_request(
 ) -> Result<Json<dfc_core::RollbackResponse>, ApiError> {
     let tenant = tenant_from_headers(&headers)?;
     tenant.ensure(&body.tenant_id)?;
+
+    validate_field(&body.tenant_id, "tenant_id")?;
+    validate_field(&body.branch_id, "branch_id")?;
+    validate_field(&body.target_snapshot_id, "target_snapshot_id")?;
+    validate_field(&body.idempotency_key, "idempotency_key")?;
 
     let bridge = ReplayBridge::new(state.data_fabric.clone(), state.aivcs.clone())
         .with_metrics(state.metrics.clone());
@@ -1255,6 +1334,77 @@ mod tests {
         )
         .await;
         assert_eq!(resp.status(), StatusCode::BAD_REQUEST);
+    }
+
+    #[tokio::test]
+    async fn rejects_invalid_characters_in_path_params() {
+        let app = app();
+
+        let resp = get_request(&app, "/v1/correlate/branch/feat'abc", "tenant-a").await;
+        assert_eq!(resp.status(), StatusCode::BAD_REQUEST);
+        let body: ErrorBody = serde_json::from_slice(
+            &axum::body::to_bytes(resp.into_body(), usize::MAX)
+                .await
+                .unwrap(),
+        )
+        .unwrap();
+        assert_eq!(body.error, "id contains forbidden characters");
+
+        let resp = get_request(&app, "/v1/hitl/reviews/rev;1", "tenant-a").await;
+        assert_eq!(resp.status(), StatusCode::BAD_REQUEST);
+        let body: ErrorBody = serde_json::from_slice(
+            &axum::body::to_bytes(resp.into_body(), usize::MAX)
+                .await
+                .unwrap(),
+        )
+        .unwrap();
+        assert_eq!(body.error, "review_id contains forbidden characters");
+    }
+
+    #[tokio::test]
+    async fn rejects_invalid_characters_in_body_fields() {
+        let app = app();
+
+        let resp = post_json(
+            &app,
+            "/v1/events/aivcs",
+            "tenant-a",
+            serde_json::json!({
+                "event_type": "aivcs.snapshot.created",
+                "tenant_id": "tenant-a",
+                "idempotency_key": "snap'key",
+                "aivcs_ref": "aivcs:snapshot:snap_1"
+            }),
+        )
+        .await;
+        assert_eq!(resp.status(), StatusCode::BAD_REQUEST);
+        let body: ErrorBody = serde_json::from_slice(
+            &axum::body::to_bytes(resp.into_body(), usize::MAX)
+                .await
+                .unwrap(),
+        )
+        .unwrap();
+        assert_eq!(body.error, "idempotency_key contains forbidden characters");
+
+        let resp = post_json(
+            &app,
+            "/v1/replay/request",
+            "tenant-a",
+            serde_json::json!({
+                "tenant_id": "tenant-a",
+                "run_id": "run/1",
+                "idempotency_key": "replay-key"
+            }),
+        )
+        .await;
+        assert_eq!(resp.status(), StatusCode::BAD_REQUEST);
+        let body: ErrorBody = serde_json::from_slice(
+            &axum::body::to_bytes(resp.into_body(), usize::MAX)
+                .await
+                .unwrap(),
+        )
+        .unwrap();
+        assert_eq!(body.error, "run_id contains forbidden characters");
     }
 
     #[tokio::test]
