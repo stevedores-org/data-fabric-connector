@@ -373,19 +373,48 @@ async fn hitl_review_decision(
         .await
         .map_err(ApiError::from)?;
 
-    let aivcs_result = state
+    let aivcs_result = match state
         .aivcs
         .submit_review_decision(&ReviewDecisionPayload {
             tenant_id: tenant.tenant_id.clone(),
             review_id: review_id.clone(),
             decision: body.decision.as_str().into(),
             comment: body.comment.clone(),
-            idempotency_key: body.idempotency_key,
-            run_id: correlation.data_fabric_run_id,
-            task_id: correlation.data_fabric_task_id,
+            idempotency_key: body.idempotency_key.clone(),
+            run_id: correlation.data_fabric_run_id.clone(),
+            task_id: correlation.data_fabric_task_id.clone(),
         })
         .await
-        .map_err(ApiError::from)?;
+    {
+        Ok(res) => res,
+        Err(e) => {
+            // Compensating event: record that AIVCS submission failed so audit trail
+            // shows the attempted decision and the failure reason.
+            let mut failed_event = dfc_core::DfcEvent::new(
+                "hitl.review.decision.failed",
+                tenant.tenant_id.clone(),
+                body.idempotency_key.clone(),
+                dfc_core::SourceSystem::AivcsHumanInTheLoop,
+            );
+            failed_event.run_id = correlation.data_fabric_run_id.clone();
+            failed_event.task_id = correlation.data_fabric_task_id.clone();
+            failed_event.metadata = serde_json::json!({
+                "review_id": review_id,
+                "reviewer": body.reviewer.as_deref().unwrap_or("unknown"),
+                "comment": body.comment,
+                "decision": body.decision.as_str(),
+                "aivcs_error": format!("{}", e),
+            });
+
+            // Best-effort ingest of the compensating event — don't return its error
+            let _ = state.data_fabric.ingest_event(&failed_event).await;
+
+            return Err(ApiError::Upstream(format!(
+                "aivcs submit failed; compensating event recorded: {}",
+                e
+            )));
+        }
+    };
 
     Ok(Json(ReviewDecisionResponse {
         review_id,
