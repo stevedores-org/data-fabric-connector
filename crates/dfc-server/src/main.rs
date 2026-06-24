@@ -164,6 +164,21 @@ fn tenant_from_headers(headers: &HeaderMap) -> Result<TenantContext, ApiError> {
         .ok_or_else(|| ApiError::BadRequest("X-Tenant-Id header is required".into()))
 }
 
+fn validate_route_id(name: &str, value: &str) -> Result<(), ApiError> {
+    if value.is_empty() {
+        return Err(ApiError::BadRequest(format!("{name} cannot be empty")));
+    }
+    let is_valid = value
+        .chars()
+        .all(|c| c.is_ascii_alphanumeric() || c == '.' || c == '_' || c == '-' || c == ':');
+    if !is_valid {
+        return Err(ApiError::BadRequest(format!(
+            "{name} contains forbidden characters"
+        )));
+    }
+    Ok(())
+}
+
 fn actor_from_headers(headers: &HeaderMap) -> String {
     headers
         .get("x-actor")
@@ -233,6 +248,8 @@ async fn correlate_get(
     Path((kind, id)): Path<(String, String)>,
 ) -> Result<Json<CorrelationRecord>, ApiError> {
     let tenant = tenant_from_headers(&headers)?;
+    validate_route_id("kind", &kind)?;
+    validate_route_id("id", &id)?;
     if CorrelationKind::parse(&kind).is_none() {
         return Err(ApiError::BadRequest(format!("unknown kind: {kind}")));
     }
@@ -309,6 +326,7 @@ async fn hitl_review_get(
     Path(review_id): Path<String>,
 ) -> Result<Response, ApiError> {
     let tenant = tenant_from_headers(&headers)?;
+    validate_route_id("review_id", &review_id)?;
     let assembler = ReviewBundleAssembler::new(state.data_fabric.clone(), state.aivcs.clone());
     let bundle = assembler
         .assemble(&tenant.tenant_id, &review_id)
@@ -335,6 +353,7 @@ async fn hitl_review_decision(
     Json(body): Json<ReviewDecisionRequest>,
 ) -> Result<Json<ReviewDecisionResponse>, ApiError> {
     let tenant = tenant_from_headers(&headers)?;
+    validate_route_id("review_id", &review_id)?;
 
     if body.idempotency_key.trim().is_empty() {
         return Err(ApiError::BadRequest("idempotency_key is required".into()));
@@ -1219,5 +1238,79 @@ mod tests {
         )
         .await;
         assert_eq!(resp.status(), StatusCode::BAD_REQUEST);
+    }
+
+    #[test]
+    fn test_validate_route_id_helper() {
+        // Valid cases
+        assert!(validate_route_id("id", "valid-id-123.abc_def:ghi").is_ok());
+
+        // Invalid cases
+        assert!(validate_route_id("id", "").is_err());
+        assert!(validate_route_id("id", "id with spaces").is_err());
+        assert!(validate_route_id("id", "id/with/slashes").is_err());
+        assert!(validate_route_id("id", "id\\with\\backslashes").is_err());
+        assert!(validate_route_id("id", "id\"with\"quotes").is_err());
+        assert!(validate_route_id("id", "id'with'quotes").is_err());
+    }
+
+    #[tokio::test]
+    async fn test_path_params_charset_validation_endpoints() {
+        let app = app();
+
+        // 1. correlate_get with invalid kind
+        let resp = get_request(&app, "/v1/correlate/branch%20/some-id", "tenant-a").await;
+        assert_eq!(resp.status(), StatusCode::BAD_REQUEST);
+        let body: serde_json::Value = serde_json::from_slice(
+            &axum::body::to_bytes(resp.into_body(), usize::MAX)
+                .await
+                .unwrap(),
+        )
+        .unwrap();
+        assert_eq!(body["error"], "kind contains forbidden characters");
+
+        // 2. correlate_get with invalid id
+        let resp = get_request(&app, "/v1/correlate/branch/some%22id", "tenant-a").await;
+        assert_eq!(resp.status(), StatusCode::BAD_REQUEST);
+        let body: serde_json::Value = serde_json::from_slice(
+            &axum::body::to_bytes(resp.into_body(), usize::MAX)
+                .await
+                .unwrap(),
+        )
+        .unwrap();
+        assert_eq!(body["error"], "id contains forbidden characters");
+
+        // 3. hitl_review_get with invalid review_id
+        let resp = get_request(&app, "/v1/hitl/reviews/rev%201", "tenant-a").await;
+        assert_eq!(resp.status(), StatusCode::BAD_REQUEST);
+        let body: serde_json::Value = serde_json::from_slice(
+            &axum::body::to_bytes(resp.into_body(), usize::MAX)
+                .await
+                .unwrap(),
+        )
+        .unwrap();
+        assert_eq!(body["error"], "review_id contains forbidden characters");
+
+        // 4. hitl_review_decision with invalid review_id
+        let decision = serde_json::json!({
+            "decision": "approved",
+            "comment": "looks good",
+            "idempotency_key": "decision-key-1"
+        });
+        let resp = post_json(
+            &app,
+            "/v1/hitl/reviews/rev%201/decision",
+            "tenant-a",
+            decision,
+        )
+        .await;
+        assert_eq!(resp.status(), StatusCode::BAD_REQUEST);
+        let body: serde_json::Value = serde_json::from_slice(
+            &axum::body::to_bytes(resp.into_body(), usize::MAX)
+                .await
+                .unwrap(),
+        )
+        .unwrap();
+        assert_eq!(body["error"], "review_id contains forbidden characters");
     }
 }
