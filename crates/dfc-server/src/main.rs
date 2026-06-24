@@ -59,7 +59,7 @@ struct StagedIngestResponse {
     pending: Vec<dfc_core::PendingCorrelation>,
 }
 
-#[derive(Serialize)]
+#[derive(Serialize, Deserialize)]
 struct ErrorBody {
     error: String,
 }
@@ -145,6 +145,16 @@ fn tenant_from_headers(headers: &HeaderMap) -> Result<TenantContext, ApiError> {
         .ok_or_else(|| ApiError::BadRequest("X-Tenant-Id header is required".into()))
 }
 
+fn validate_route_id<'a>(s: &'a str, field_name: &str) -> Result<&'a str, ApiError> {
+    if s.chars().all(|c| c.is_ascii_alphanumeric() || c == '.' || c == '_' || c == ':' || c == '-') {
+        Ok(s)
+    } else {
+        Err(ApiError::BadRequest(format!(
+            "{field_name} contains forbidden characters (allowed: alphanumeric, '.', '_', ':', '-')"
+        )))
+    }
+}
+
 fn actor_from_headers(headers: &HeaderMap) -> String {
     headers
         .get("x-actor")
@@ -167,6 +177,13 @@ async fn correlate_create(
 
     if body.tenant_id.trim().is_empty() {
         return Err(ApiError::BadRequest("tenant_id is required".into()));
+    }
+
+    if let Some(run_id) = &body.data_fabric_run_id {
+        validate_route_id(run_id, "run_id")?;
+    }
+    if let Some(task_id) = &body.data_fabric_task_id {
+        validate_route_id(task_id, "task_id")?;
     }
 
     body.validate().map_err(ApiError::from)?;
@@ -214,6 +231,9 @@ async fn correlate_get(
     Path((kind, id)): Path<(String, String)>,
 ) -> Result<Json<CorrelationRecord>, ApiError> {
     let tenant = tenant_from_headers(&headers)?;
+    validate_route_id(&kind, "kind")?;
+    validate_route_id(&id, "id")?;
+
     if CorrelationKind::parse(&kind).is_none() {
         return Err(ApiError::BadRequest(format!("unknown kind: {kind}")));
     }
@@ -238,6 +258,11 @@ async fn events_aivcs(
     if body.idempotency_key.trim().is_empty() {
         return Err(ApiError::BadRequest("idempotency_key is required".into()));
     }
+    validate_route_id(&body.idempotency_key, "idempotency_key")?;
+
+    if let Some(run_id) = &body.run_id {
+        validate_route_id(run_id, "run_id")?;
+    }
 
     let outcome = state
         .ingest
@@ -258,6 +283,7 @@ async fn events_hitl(
     if body.idempotency_key.trim().is_empty() {
         return Err(ApiError::BadRequest("idempotency_key is required".into()));
     }
+    validate_route_id(&body.idempotency_key, "idempotency_key")?;
 
     let outcome = state
         .ingest
@@ -290,6 +316,7 @@ async fn hitl_review_get(
     Path(review_id): Path<String>,
 ) -> Result<Response, ApiError> {
     let tenant = tenant_from_headers(&headers)?;
+    validate_route_id(&review_id, "review_id")?;
     let assembler = ReviewBundleAssembler::new(state.data_fabric.clone(), state.aivcs.clone());
     let bundle = assembler
         .assemble(&tenant.tenant_id, &review_id)
@@ -316,10 +343,12 @@ async fn hitl_review_decision(
     Json(body): Json<ReviewDecisionRequest>,
 ) -> Result<Json<ReviewDecisionResponse>, ApiError> {
     let tenant = tenant_from_headers(&headers)?;
+    validate_route_id(&review_id, "review_id")?;
 
     if body.idempotency_key.trim().is_empty() {
         return Err(ApiError::BadRequest("idempotency_key is required".into()));
     }
+    validate_route_id(&body.idempotency_key, "idempotency_key")?;
 
     let correlation = state
         .data_fabric
@@ -385,6 +414,9 @@ async fn replay_request(
     let tenant = tenant_from_headers(&headers)?;
     tenant.ensure(&body.tenant_id)?;
 
+    validate_route_id(&body.run_id, "run_id")?;
+    validate_route_id(&body.idempotency_key, "idempotency_key")?;
+
     let bridge = ReplayBridge::new(state.data_fabric.clone(), state.aivcs.clone());
     let response = bridge
         .handle_replay(AuditContext::new(actor_from_headers(&headers), None), body)
@@ -401,6 +433,9 @@ async fn rollback_request(
 ) -> Result<Json<dfc_core::RollbackResponse>, ApiError> {
     let tenant = tenant_from_headers(&headers)?;
     tenant.ensure(&body.tenant_id)?;
+
+    validate_route_id(&body.branch_id, "branch_id")?;
+    validate_route_id(&body.idempotency_key, "idempotency_key")?;
 
     let bridge = ReplayBridge::new(state.data_fabric.clone(), state.aivcs.clone());
     let response = bridge
@@ -1054,5 +1089,71 @@ mod tests {
         )
         .await;
         assert_eq!(resp.status(), StatusCode::BAD_REQUEST);
+    }
+
+    #[tokio::test]
+    async fn correlate_get_rejects_invalid_charset_in_id() {
+        let app = app();
+        let resp = get_request(&app, "/v1/correlate/run/run-with@symbol", "tenant-a").await;
+        assert_eq!(resp.status(), StatusCode::BAD_REQUEST);
+        let body = axum::body::to_bytes(resp.into_body(), usize::MAX)
+            .await
+            .unwrap();
+        let error: ErrorBody = serde_json::from_slice(&body).unwrap();
+        assert!(error.error.contains("forbidden characters"));
+    }
+
+    #[tokio::test]
+    async fn hitl_review_get_rejects_invalid_charset_in_review_id() {
+        let app = app();
+        let resp = get_request(&app, "/v1/hitl/reviews/rev-with*star", "tenant-a").await;
+        assert_eq!(resp.status(), StatusCode::BAD_REQUEST);
+        let body = axum::body::to_bytes(resp.into_body(), usize::MAX)
+            .await
+            .unwrap();
+        let error: ErrorBody = serde_json::from_slice(&body).unwrap();
+        assert!(error.error.contains("forbidden characters"));
+    }
+
+    #[tokio::test]
+    async fn events_aivcs_rejects_invalid_charset_in_idempotency_key() {
+        let app = app();
+        let resp = post_json(
+            &app,
+            "/v1/events/aivcs",
+            "tenant-a",
+            serde_json::json!({
+                "event_type": "aivcs.snapshot.created",
+                "tenant_id": "tenant-a",
+                "idempotency_key": "key-with-@-sign",
+                "aivcs_ref": "aivcs:snapshot:snap_1",
+                "run_id": "run-1"
+            }),
+        )
+        .await;
+        assert_eq!(resp.status(), StatusCode::BAD_REQUEST);
+        let body = axum::body::to_bytes(resp.into_body(), usize::MAX)
+            .await
+            .unwrap();
+        let error: ErrorBody = serde_json::from_slice(&body).unwrap();
+        assert!(error.error.contains("forbidden characters"));
+    }
+
+    #[tokio::test]
+    async fn valid_charset_ids_accepted() {
+        let app = app();
+        let body = serde_json::json!({
+            "tenant_id": "tenant-a",
+            "kind": "branch",
+            "source_system": "github",
+            "source_id": "feature-abc_123.v2",
+            "target_system": "aivcs",
+            "target_id": "branch:abc-def_123.v2",
+        });
+        let resp = post_json(&app, "/v1/correlate", "tenant-a", body).await;
+        assert_eq!(resp.status(), StatusCode::OK);
+
+        let resp = get_request(&app, "/v1/correlate/branch/feature-abc_123.v2", "tenant-a").await;
+        assert_eq!(resp.status(), StatusCode::OK);
     }
 }
